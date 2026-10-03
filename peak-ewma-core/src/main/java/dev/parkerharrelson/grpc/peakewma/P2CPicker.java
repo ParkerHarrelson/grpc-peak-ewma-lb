@@ -103,8 +103,53 @@ public final class P2CPicker extends SubchannelPicker {
 
         final String method = methodName(args.getMethodDescriptor());
         final long now = clocks.nanoTime();
-
         final int n = readyPool.size();
+
+        // Fast path, O(1): sample two distinct peers and score only those. Retry a couple of
+        // times if both happen to be ejected; only fall back to scanning the whole pool when
+        // ejections are dense enough that random sampling keeps missing.
+        if (n == 1) {
+            LoadBalancer.Subchannel only = readyPool.get(0);
+            if (!Double.isInfinite(cost(only, method, now))) {
+                metrics.recordPick(OK);
+                return buildPickResult(only, method);
+            }
+        } else {
+            ThreadLocalRandom rnd = ThreadLocalRandom.current();
+            for (int attempt = 0; attempt < 3; attempt++) {
+                // Uniform over ordered pairs of distinct indices.
+                int i1 = rnd.nextInt(n);
+                int i2 = rnd.nextInt(n - 1);
+                if (i2 >= i1) i2++;
+                LoadBalancer.Subchannel a = readyPool.get(i1);
+                LoadBalancer.Subchannel b = readyPool.get(i2);
+                double ca = cost(a, method, now);
+                double cb = cost(b, method, now);
+                boolean fa = !Double.isInfinite(ca);
+                boolean fb = !Double.isInfinite(cb);
+                if (fa || fb) {
+                    LoadBalancer.Subchannel chosen;
+                    if (fa && fb) {
+                        // Sub-promille jitter breaks exact ties so identical peers don't
+                        // lock-step onto one subchannel.
+                        chosen =
+                                ca * (1.0 + 1e-4 * rnd.nextDouble())
+                                                <= cb * (1.0 + 1e-4 * rnd.nextDouble())
+                                        ? a
+                                        : b;
+                    } else {
+                        chosen = fa ? a : b;
+                    }
+                    metrics.recordPick(OK);
+                    return buildPickResult(chosen, method);
+                }
+            }
+        }
+        return pickByScan(method, now, n);
+    }
+
+    /** Slow path: score every peer. Only reached when the sampled peers were all ejected. */
+    private PickResult pickByScan(String method, long now, int n) {
         int[] idx = new int[n];
         double[] costs = new double[n];
         int m = 0;
@@ -184,7 +229,7 @@ public final class P2CPicker extends SubchannelPicker {
                 continue;
             }
 
-            MethodStats methodStats = methodTable.statsFor(method);
+            MethodStats methodStats = methodTable.peekStats(method);
             double cost = costIgnoringEjection(methodStats, methodTable);
             long lastEnd = subchannelState.lastEjectEndNanos();
 
@@ -202,7 +247,7 @@ public final class P2CPicker extends SubchannelPicker {
         // warmup, since the goal is simply to find the least-bad option until real ejections
         // expire. Score on the peak EWMA (fast) so the same "best observed latency" metric
         // drives both the main and fallback picks.
-        double score = Math.max(EPS, ms.getEwmaFastMicros());
+        double score = Math.max(EPS, ms != null ? ms.getEwmaFastMicros() : mt.cachedSeedMicros());
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
         return score * busy;
     }
@@ -211,7 +256,9 @@ public final class P2CPicker extends SubchannelPicker {
         MethodTable methodTable = tables.get(subchannel);
         if (methodTable == null) return Double.POSITIVE_INFINITY;
 
-        MethodStats methodStats = methodTable.statsFor(method);
+        // Read-only lookup: scoring must not materialise per-method state on peers that are not
+        // picked (the tracer creates it for the peer that actually serves the call).
+        MethodStats methodStats = methodTable.peekStats(method);
         SubchannelState subchannelState = states.get(subchannel);
         if (subchannelState == null) return Double.POSITIVE_INFINITY;
 
@@ -250,7 +297,16 @@ public final class P2CPicker extends SubchannelPicker {
             long now,
             double inflightWeightEff,
             PeakEwmaConfig cfg) {
-        double score = Math.max(EPS, decayedPeakMicros(ms, now, cfg));
+        double score =
+                Math.max(
+                        EPS,
+                        ms != null
+                                ? decayedPeakMicros(ms, now, cfg)
+                                // Never served this method: its seed, decayed since the peer
+                                // became READY, so long-ready peers get probed for new methods.
+                                : mt.cachedSeedMicros()
+                                        * EwmaClocks.decayFactor(
+                                                now, st.readySinceNanos(), cfg.tauFastMillis));
 
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
 

@@ -272,7 +272,6 @@ class AdversarialSimulationTest {
      * allocates per-backend state for methods the backend never served.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void pick_doesNotCreateStateOnUnpickedBackends() {
         AdversarialFixture f = fleet(50, 5.0);
         f.pick(AdversarialFixture.method("svc/NeverCalledBefore"));
