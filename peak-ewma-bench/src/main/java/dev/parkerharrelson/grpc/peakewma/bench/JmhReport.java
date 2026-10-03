@@ -25,6 +25,8 @@ public final class JmhReport {
         List<String> header = split(lines.get(0));
         int iBench = header.indexOf("Benchmark");
         int iScore = header.indexOf("Score");
+        int iError = header.indexOf("Score Error (99.9%)");
+        int iSamples = header.indexOf("Samples");
         int iUnit = header.indexOf("Unit");
         int iPolicy = header.indexOf("Param: policy");
         int iBackends = header.indexOf("Param: backends");
@@ -33,6 +35,7 @@ public final class JmhReport {
         Map<String, Map<String, Map<Integer, String[]>>> t = new TreeMap<>();
         Map<String, String> units = new TreeMap<>();
         TreeSet<Integer> sizes = new TreeSet<>();
+        String samples = "?";
         for (String line : lines.subList(1, lines.size())) {
             List<String> c = split(line);
             String bench = c.get(iBench);
@@ -49,14 +52,23 @@ public final class JmhReport {
                             .computeIfAbsent(c.get(iPolicy), k -> new TreeMap<>())
                             .computeIfAbsent(n, k -> new String[2]);
             double v = Double.parseDouble(c.get(iScore));
+            double err = iError >= 0 ? parseOrNaN(c.get(iError)) : Double.NaN;
+            String f = v < 100 ? "%,.1f" : "%,.0f";
             if (alloc) cell[1] = String.format(Locale.ROOT, "%,.0f B", v);
             else {
-                cell[0] = String.format(Locale.ROOT, v < 100 ? "%,.1f" : "%,.0f", v);
+                cell[0] = String.format(Locale.ROOT, f, v);
+                if (!Double.isNaN(err)) cell[0] += " ± " + String.format(Locale.ROOT, f, err);
                 units.put(key, c.get(iUnit));
             }
+            if (iSamples >= 0) samples = c.get(iSamples);
         }
 
         StringBuilder md = new StringBuilder();
+        md.append("Score ± JMH 99.9% confidence error over ")
+                .append(samples)
+                .append(
+                        " measurement iterations (forks × iterations); allocation in"
+                                + " parentheses.\n\n");
         for (var e : t.entrySet()) {
             md.append("## ")
                     .append(e.getKey())
@@ -84,6 +96,14 @@ public final class JmhReport {
         }
         Files.writeString(Path.of(args[1]), md);
         System.out.print(md);
+    }
+
+    private static double parseOrNaN(String s) {
+        try {
+            return Double.parseDouble(s);
+        } catch (NumberFormatException e) {
+            return Double.NaN; // JMH writes NaN when there is a single measurement
+        }
     }
 
     private static List<String> split(String csvLine) {

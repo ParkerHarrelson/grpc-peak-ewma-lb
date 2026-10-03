@@ -7,7 +7,15 @@ policies: `pick_first`, `round_robin`, `least_request_experimental` and `weighte
 ```bash
 peak-ewma-bench/run-benchmarks.sh            # full run, ~25-35 min
 QUICK=1 peak-ewma-bench/run-benchmarks.sh    # smoke run, ~5 min
+RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh # 5 runs per row + 3 JMH forks, with 95% CIs, ~2-3 h
+POLICIES=round_robin,peak_ewma_p2c SIZES=10,500 RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh  # targeted
 ```
+
+`REPEATS` / `FORKS` set the counts explicitly. With more than one repeat, every overhead row is
+run that many times in fresh JVMs, **interleaved across policies** (so thermal drift or
+background load hits every policy equally), and reported as mean ± 95% CI (Student t). Each
+Δ vs round_robin gets a Welch t-test and is marked `n.s.` when it isn't significant at p<0.05.
+JMH cells show JMH's own 99.9% confidence error.
 
 Output: `peak-ewma-bench/target/report/REPORT.md` (plus raw `overhead.md`, `picker.csv`, `rpc.csv`).
 
@@ -33,6 +41,10 @@ java -cp $JAR dev.parkerharrelson.grpc.peakewma.bench.OverheadReport --sizes 10,
 
 - Client and backends share a JVM. Backend work is identical across policies, so compare
   **deltas**, not absolute CPU numbers.
-- Close other heavy processes; numbers move ±10% run to run on a laptop. Use the JMH numbers for
-  small differences, and the overhead report for whole-process cost.
+- Close other heavy processes; single runs move ±10–20% on a laptop. Don't read differences
+  smaller than that from a single run; use `RIGOROUS=1` (or `REPEATS`) and trust only Δs not
+  marked `n.s.`.
+- The single-thread `RpcBenchmark` shows peak_ewma_p2c and weighted_round_robin faster than
+  round_robin per RPC, which no LB can genuinely be; it's an unexplained artifact of the
+  in-process transport's executor path. Prefer the 8-thread variant and the overhead report.
 - Quick mode uses very short JMH iterations; single-thread `RpcBenchmark` numbers are noisy there.
