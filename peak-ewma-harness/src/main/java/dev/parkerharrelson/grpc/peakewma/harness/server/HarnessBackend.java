@@ -7,6 +7,7 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 
 /**
  * One simulated backend: a real Netty gRPC server bound to an ephemeral localhost port, serving an
@@ -37,6 +38,18 @@ public final class HarnessBackend implements AutoCloseable {
     }
 
     public HarnessBackend(String id, BackendBehaviour behaviour) throws IOException {
+        this(id, behaviour, b -> b);
+    }
+
+    /**
+     * @param serverCustomizer applied to the Netty server builder before start, e.g. to set {@code
+     *     maxConnectionAge} so the server periodically GOAWAYs its clients
+     */
+    public HarnessBackend(
+            String id,
+            BackendBehaviour behaviour,
+            UnaryOperator<NettyServerBuilder> serverCustomizer)
+            throws IOException {
         this.id = id;
         this.behaviour = behaviour;
         // One small scheduler per backend so a slow / outage backend doesn't block the others.
@@ -51,8 +64,11 @@ public final class HarnessBackend implements AutoCloseable {
         this.service = new InjectableService(behaviour, latencyScheduler);
 
         this.server =
-                NettyServerBuilder.forAddress(new InetSocketAddress(LOOPBACK_HOST, 0))
-                        .addService(service.bindService())
+                serverCustomizer
+                        .apply(
+                                NettyServerBuilder.forAddress(
+                                                new InetSocketAddress(LOOPBACK_HOST, 0))
+                                        .addService(service.bindService()))
                         .build()
                         .start();
     }

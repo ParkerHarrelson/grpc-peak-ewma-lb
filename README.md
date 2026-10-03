@@ -27,6 +27,7 @@ ManagedChannel channel =
 | `peak-ewma-micrometer`    | `LbMetrics` adapter for any Micrometer `MeterRegistry`.                    | core, `micrometer-core`    |
 | `peak-ewma-opentelemetry` | `LbMetrics` adapter for the OpenTelemetry metrics API.                     | core, `opentelemetry-api`  |
 | `peak-ewma-harness`       | In-process benchmark rig with fault injection. Not published.              | core, micrometer, netty    |
+| `peak-ewma-bench`         | CPU/memory overhead + JMH comparison vs grpc-java's built-in policies. Not published. See [its README](peak-ewma-bench/README.md). | core, harness, grpc-xds, JMH |
 
 ```xml
 <dependency>

@@ -70,6 +70,11 @@ public final class HarnessChannel implements AutoCloseable {
                         .build();
     }
 
+    /** Name under which this channel's addresses are registered with the static resolver. */
+    public String resolverName() {
+        return resolverName;
+    }
+
     public ManagedChannel channel() {
         return channel;
     }
