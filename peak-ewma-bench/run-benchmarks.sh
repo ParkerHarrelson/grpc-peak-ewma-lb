@@ -7,6 +7,9 @@
 #   peak-ewma-bench/run-benchmarks.sh            # full run (~25-35 min)
 #   QUICK=1 peak-ewma-bench/run-benchmarks.sh    # smoke run (~5 min)
 #   RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh # 5 interleaved runs/row + 3 JMH forks, with CIs (~2-3 h)
+#   FAST_RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh  # CIs on the headline numbers only (~8 min):
+#                                                # round_robin vs peak_ewma_p2c @ 100/500 backends,
+#                                                # 3 repeats x 4 s; JMH picker, 3 forks; no RPC/quality
 #   REPEATS=n FORKS=n ...                        # explicit repeat/fork counts
 #   POLICIES=round_robin,peak_ewma_p2c SIZES=10,500 ...   # restrict the matrix
 #   MVN_ARGS="-s ~/my-settings.xml" ...          # extra Maven args
@@ -28,6 +31,20 @@ FILTER=()
 [[ -n "${POLICIES:-}" ]] && FILTER+=(-p "policy=$POLICIES")
 OVERHEAD_FILTER=()
 [[ -n "${POLICIES:-}" ]] && OVERHEAD_FILTER+=(--policies "$POLICIES")
+
+if [[ "${FAST_RIGOROUS:-0}" == "1" ]]; then
+  P=${POLICIES:-round_robin,peak_ewma_p2c}
+  java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.OverheadReport --seconds 4 --warmup 2 \
+      --sizes "${SIZES:-100,500}" --policies "$P" --repeats "${REPEATS:-3}" --skip-quality --out "$OUT/overhead.md"
+  java -jar "$JAR" 'PickerBenchmark' -p "policy=$P" -p "backends=${SIZES:-10,500}" -f "${FORKS:-3}" \
+      -wi 2 -i 3 -w 1 -r 1 -prof gc -rf csv -rff "$OUT/picker.csv"
+  java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.JmhReport "$OUT/picker.csv" "$OUT/picker.md" >/dev/null
+  { echo "# peak_ewma_p2c vs grpc-java built-in policies (fast rigorous)"; echo
+    sed 's/^# LB overhead report//' "$OUT/overhead.md"; echo
+    echo "# JMH: LB pick path"; echo; cat "$OUT/picker.md"; } > "$OUT/REPORT.md"
+  echo "Report: $OUT/REPORT.md"
+  exit 0
+fi
 
 if [[ "${QUICK:-0}" == "1" ]]; then
   OVERHEAD=(--seconds 3 --warmup 2 --sizes 3,100)

@@ -7,6 +7,7 @@ policies: `pick_first`, `round_robin`, `least_request_experimental` and `weighte
 ```bash
 peak-ewma-bench/run-benchmarks.sh            # full run, ~25-35 min
 QUICK=1 peak-ewma-bench/run-benchmarks.sh    # smoke run, ~5 min
+FAST_RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh  # CIs on the headline numbers, ~8 min
 RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh # 5 runs per row + 3 JMH forks, with 95% CIs, ~2-3 h
 POLICIES=round_robin,peak_ewma_p2c SIZES=10,500 RIGOROUS=1 peak-ewma-bench/run-benchmarks.sh  # targeted
 ```
