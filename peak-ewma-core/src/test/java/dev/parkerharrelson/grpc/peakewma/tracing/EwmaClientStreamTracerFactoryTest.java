@@ -89,7 +89,9 @@ class EwmaClientStreamTracerFactoryTest {
         mc.advanceNanos(1_000_000L);
         tracer.streamClosed(io.grpc.Status.INTERNAL);
 
-        assertEquals(1, table.statsFor("").getSamples());
+        // Server failures are penalties, not latency samples.
+        assertEquals(0, table.statsFor("").getSamples());
+        assertEquals(2.0 * c.initialRttMicros, table.statsFor("").getEwmaFastMicros(), 1e-6);
         assertEquals(1, table.windowFor("").snapshot(mc.now()).total);
     }
 }

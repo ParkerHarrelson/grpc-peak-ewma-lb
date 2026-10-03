@@ -32,7 +32,12 @@ public final class MethodStats {
 
     private final AtomicLong meanBits = new AtomicLong(Double.doubleToRawLongBits(0.0));
     private double m2Micros = 0.0;
-    private int varN = 0;
+    private long varN = 0;
+    // Guarded by varLock: true until the first sample (success or failure) lands.
+    private boolean fastIsSeed = true;
+
+    /** Upper bound for the failure penalty recorded into the fast EWMA (10 s). */
+    static final double MAX_PENALTY_MICROS = 10_000_000.0;
 
     private final ReentrantLock varLock = new ReentrantLock();
     private volatile double varMicros = 0.0;
@@ -61,6 +66,25 @@ public final class MethodStats {
      * @param cfg current Peak-EWMA config (tau fast/slow etc.)
      */
     public void update(long nowNanos, long rttNanos, PeakEwmaConfig cfg) {
+        update(nowNanos, rttNanos, cfg, false);
+    }
+
+    /**
+     * Records one completed call.
+     *
+     * <p>When {@code serverFailure} is true the call failed in a way that says the backend is
+     * unhealthy (UNAVAILABLE, INTERNAL, ...). Its RTT is usually tiny, so recording it as-is would
+     * make a failing backend look like the fastest one. Instead the fast (peak) EWMA takes a
+     * penalty of at least twice the current estimate, capped at {@link #MAX_PENALTY_MICROS}; the
+     * slow EWMA and the variance only ever see real successful latencies, so they remain a clean
+     * baseline for outlier detection.
+     *
+     * @param nowNanos end-of-call timestamp from the shared clock
+     * @param rttNanos observed RTT in nanoseconds; must be non-negative
+     * @param cfg current Peak-EWMA config (tau fast/slow etc.)
+     * @param serverFailure whether the call failed with a server-health status
+     */
+    public void update(long nowNanos, long rttNanos, PeakEwmaConfig cfg, boolean serverFailure) {
         double rttMicros = EwmaClocks.nanosToMicros(rttNanos);
 
         // Serialize the full EWMA + variance update so concurrent samples cannot lose each
@@ -69,20 +93,41 @@ public final class MethodStats {
         // but a single update is applied atomically relative to other updates.
         varLock.lock();
         try {
+            if (serverFailure) {
+                long tauFastEff = PeakEwmaTuner.tauFastMillis(this, cfg);
+                double decayFast = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauFastEff);
+                double penalty =
+                        Math.min(
+                                MAX_PENALTY_MICROS,
+                                Math.max(
+                                        rttMicros,
+                                        2.0
+                                                * Math.max(
+                                                        ewmaFastMicros * decayFast,
+                                                        ewmaSlowMicros)));
+                ewmaFastMicros = Math.max(penalty, ewmaFastMicros * decayFast);
+                fastIsSeed = false;
+                lastUpdateNanos = nowNanos;
+                return;
+            }
+
             long tauFastEff = PeakEwmaTuner.tauFastMillis(this, cfg);
             long tauSlowEff = PeakEwmaTuner.tauSlowMillis(this, cfg);
-
             double decayFast = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauFastEff);
             double decaySlow = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauSlowEff);
 
-            double fast = Math.max(rttMicros, ewmaFastMicros * decayFast);
-            double slow = rttMicros * (1 - decaySlow) + ewmaSlowMicros * decaySlow;
-
-            ewmaFastMicros = fast;
-            ewmaSlowMicros = slow;
+            // The first real sample replaces the seed outright. Blending it with the seed using
+            // the 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
+            ewmaFastMicros =
+                    fastIsSeed ? rttMicros : Math.max(rttMicros, ewmaFastMicros * decayFast);
+            ewmaSlowMicros =
+                    (varN == 0)
+                            ? rttMicros
+                            : rttMicros * (1 - decaySlow) + ewmaSlowMicros * decaySlow;
+            fastIsSeed = false;
             lastUpdateNanos = nowNanos;
 
-            int n = ++varN;
+            long n = ++varN;
             double curMean = Double.longBitsToDouble(meanBits.get());
             double newMean;
             double newM2;
@@ -99,12 +144,18 @@ public final class MethodStats {
             meanBits.set(Double.doubleToRawLongBits(newMean));
 
             varMicros = (n > 1) ? Math.max(0.0, newM2 / (n - 1)) : 0.0;
+
+            // Saturating: only "at least minSamples" matters, and an int that wraps after 2^31
+            // calls would flip a busy peer back to "cold".
+            int s = samples.get();
+            if (s == 0) {
+                firstSampleNanos.compareAndSet(0L, nowNanos);
+            }
+            if (s < Integer.MAX_VALUE) {
+                samples.set(s + 1);
+            }
         } finally {
             varLock.unlock();
-        }
-
-        if (samples.getAndIncrement() == 0) {
-            firstSampleNanos.compareAndSet(0L, nowNanos);
         }
     }
 

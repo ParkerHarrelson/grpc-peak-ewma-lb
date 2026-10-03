@@ -233,9 +233,9 @@ public final class P2CPicker extends SubchannelPicker {
      * balancer's metric emission path so that the {@code lb.subchannel.method.cost} gauge always
      * matches the value the picker would actually score against.
      *
-     * <p>Warm peers score on the fast (peak) EWMA so a slow spike is penalised immediately. Cold
-     * peers (too few samples or stale) fall back to the slow EWMA, which is seeded from config or
-     * historical methods and is more stable before fast has real data. Multiplied by a busy factor
+     * <p>Every peer scores on its fast (peak) EWMA decayed to {@code now}, so a slow spike is
+     * penalised immediately and wears off with time, and unmeasured peers (still on their seed)
+     * become cheap enough to be probed within a few half-lives. Multiplied by a busy factor
      * (inflight weight) and a warmup factor that decays from 2.0 → 1.0 over the first warmupMsEff
      * milliseconds of readiness.
      *
@@ -250,11 +250,7 @@ public final class P2CPicker extends SubchannelPicker {
             long now,
             double inflightWeightEff,
             PeakEwmaConfig cfg) {
-        boolean cold = isColdAdaptive(mt, ms, method, now, cfg);
-        double score =
-                cold
-                        ? Math.max(EPS, ms.getEwmaSlowMicros())
-                        : Math.max(EPS, ms.getEwmaFastMicros());
+        double score = Math.max(EPS, decayedPeakMicros(ms, now, cfg));
 
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
 
@@ -271,27 +267,17 @@ public final class P2CPicker extends SubchannelPicker {
         return score * busy * warm;
     }
 
-    static boolean isColdAdaptive(
-            MethodTable mt, MethodStats ms, String method, long now, PeakEwmaConfig cfg) {
-        int numSamples = ms.getSamples();
-
-        var window = mt.windowFor(method);
-        double lambda = PeakEwmaTuner.methodRatePerSec(window, now);
-
-        int minSamples = PeakEwmaTuner.minSamplesForRatioEff(lambda);
-        long minWarmMs = PeakEwmaTuner.minWarmupMillisForRatioEff(lambda);
-
-        boolean enoughSamples = numSamples >= minSamples;
-
-        long first = ms.getFirstSampleNanos();
-        long sinceFirst = (first == 0L) ? Long.MAX_VALUE : (now - first);
-        boolean enoughTime = sinceFirst >= EwmaClocks.millisToNanos(minWarmMs);
-
-        long sinceLastUpdate = now - ms.getLastUpdateNanos();
-        final long STALE_NANOS = EwmaClocks.millisToNanos(cfg.staleMillisForRatio);
-        boolean stale = sinceLastUpdate >= STALE_NANOS;
-
-        return !(enoughSamples && enoughTime) || stale;
+    /**
+     * The peak EWMA decayed to {@code now}. Decay is applied at read time, not only when a sample
+     * arrives: P2C stops sending traffic to a backend whose score spiked, so without read-time
+     * decay the spike would never wear off (and a never-picked backend would never be probed).
+     * Decaying toward zero is the standard Peak-EWMA behaviour (Finagle, tower): an idle backend's
+     * cost shrinks until it gets picked again and re-measured.
+     */
+    static double decayedPeakMicros(MethodStats ms, long now, PeakEwmaConfig cfg) {
+        long tauFastEff = PeakEwmaTuner.tauFastMillis(ms, cfg);
+        return ms.getEwmaFastMicros()
+                * EwmaClocks.decayFactor(now, ms.getLastUpdateNanos(), tauFastEff);
     }
 
     private static String methodName(MethodDescriptor<?, ?> methodDescriptor) {

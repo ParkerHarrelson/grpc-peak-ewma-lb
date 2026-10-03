@@ -61,6 +61,20 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
         this.method = method != null ? method : "";
     }
 
+    /**
+     * Statuses that say the backend (not the request) is unhealthy. Application-level outcomes
+     * (NOT_FOUND, INVALID_ARGUMENT, PERMISSION_DENIED, ...) and client cancellation come from a
+     * healthy server and are scored on their latency like successes. DEADLINE_EXCEEDED needs no
+     * penalty: its RTT is already the full deadline.
+     */
+    static boolean isServerFailure(Status status) {
+        return switch (status.getCode()) {
+            case UNAVAILABLE, INTERNAL, UNKNOWN, DATA_LOSS, RESOURCE_EXHAUSTED, UNIMPLEMENTED ->
+                    true;
+            default -> false;
+        };
+    }
+
     @Override
     public void streamCreated(Attributes transportAttrs, Metadata headers) {
         startNanos = clocks.nanoTime();
@@ -74,8 +88,11 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             long end = clocks.nanoTime();
             long rtt = (startNanos == 0L) ? 0L : Math.max(0L, end - startNanos);
 
+            boolean serverFailure = isServerFailure(status);
+            if (rtt > 0L || serverFailure) {
+                stats.update(end, rtt, cfg, serverFailure);
+            }
             if (rtt > 0L) {
-                stats.update(end, rtt, cfg);
                 metrics.recordObservedRtt(method, rtt);
             }
             window.recordResult(status.isOk(), end);

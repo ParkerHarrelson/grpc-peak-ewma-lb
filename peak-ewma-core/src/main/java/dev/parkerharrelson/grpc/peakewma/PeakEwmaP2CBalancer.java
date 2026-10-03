@@ -799,7 +799,13 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             subchannelConn.put(subchannel, effective);
 
             SubchannelState subchannelState = states.get(subchannel);
-            if (subchannelState != null && connectivityState == ConnectivityState.READY) {
+            // Restart the warmup penalty only for a backend that is plausibly cold: its first
+            // READY, or READY after a connection failure (likely a restart). A reconnect after
+            // IDLE (GOAWAY / max connection age) goes back to the same warm server; re-warming
+            // there would keep a periodically-GOAWAYing backend permanently penalised.
+            if (subchannelState != null
+                    && connectivityState == ConnectivityState.READY
+                    && (subchannelState.readySinceNanos() == 0L || previous == TRANSIENT_FAILURE)) {
                 subchannelState.markReady(clocks.nanoTime());
             }
             if (connectivityState == ConnectivityState.IDLE) {

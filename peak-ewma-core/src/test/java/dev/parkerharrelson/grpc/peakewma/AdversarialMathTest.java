@@ -97,14 +97,10 @@ class AdversarialMathTest {
             mt.windowFor("m").recordResult(true, t);
         }
         now.set(t + 5_000 * MS);
-        assertThat(P2CPicker.isColdAdaptive(mt, ms, "m", now.get(), CFG)).isFalse();
 
         ((AtomicInteger) AdversarialFixture.getField(ms, "samples")).set(Integer.MAX_VALUE);
         ms.update(now.get(), 5 * MS, CFG);
         assertThat(ms.getSamples()).as("sample counter after 2^31 calls").isPositive();
-        assertThat(P2CPicker.isColdAdaptive(mt, ms, "m", now.get(), CFG))
-                .as("isCold after 2^31 calls")
-                .isFalse();
     }
 
     /**

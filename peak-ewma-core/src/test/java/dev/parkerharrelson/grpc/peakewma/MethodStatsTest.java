@@ -51,12 +51,9 @@ class MethodStatsTest {
 
         long t1 = 10_000_000L;
         long rtt1 = 4_000_000L;
-        double prevFast0 = 5000.0;
-        double prevSlow0 = 5000.0;
-        double df1 = EwmaClocks.decayFactor(t1, 1_000_000L, cfg.tauFastMillis);
-        double ds1 = EwmaClocks.decayFactor(t1, 1_000_000L, cfg.tauSlowMillis);
-        double expectedFast1 = Math.max(4000.0, prevFast0 * df1);
-        double expectedSlow1 = 4000.0 * (1 - ds1) + prevSlow0 * ds1;
+        // The first real sample replaces the 5 ms seed outright (it is not blended with it).
+        double expectedFast1 = 4000.0;
+        double expectedSlow1 = 4000.0;
 
         ms.update(t1, rtt1, cfg);
         assertEquals(expectedFast1, ms.getEwmaFastMicros(), 1e-6);
