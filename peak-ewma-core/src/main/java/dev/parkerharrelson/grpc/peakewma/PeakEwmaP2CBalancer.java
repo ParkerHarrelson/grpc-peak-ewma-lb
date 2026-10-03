@@ -13,6 +13,7 @@ import io.grpc.ConnectivityStateInfo;
 import io.grpc.EquivalentAddressGroup;
 import io.grpc.LoadBalancer;
 import io.grpc.Status;
+import io.grpc.SynchronizationContext;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
@@ -61,6 +62,12 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
 
     // Guarded by outlierLock; a plain field is enough since all access goes through the lock.
     private ScheduledFuture<?> outlierTask;
+    private long outlierTaskPeriodMs;
+
+    // Most recent TRANSIENT_FAILURE status reported by any subchannel; surfaced by the error
+    // picker when every subchannel is in TRANSIENT_FAILURE.
+    private volatile Status lastTransientFailure = Status.UNAVAILABLE;
+    private volatile boolean shutdown;
 
     private volatile String lastReadyHash = "";
     private volatile boolean lastWasReady = false;
@@ -80,13 +87,29 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         this.metrics = (metrics != null) ? metrics : NoopLbMetrics.INSTANCE;
     }
 
+    /**
+     * Mirrors grpc's built-in policies: a resolver error while we have READY subchannels is ignored
+     * (we keep serving from the current picker); otherwise the channel goes TRANSIENT_FAILURE with
+     * the error.
+     */
     @Override
     public void handleNameResolutionError(Status error) {
-        safeUpdate(ConnectivityState.TRANSIENT_FAILURE, errorPicker(error));
+        if (lastPublishedState == ConnectivityState.READY) {
+            logger.warn("name resolution failed, keeping current READY picker: {}", error);
+            return;
+        }
+        publishNotReady(ConnectivityState.TRANSIENT_FAILURE, errorPicker(error));
     }
 
     @Override
-    public void handleResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+    public Status acceptResolvedAddresses(ResolvedAddresses resolvedAddresses) {
+        if (resolvedAddresses.getAddresses().isEmpty()) {
+            Status unavailable =
+                    Status.UNAVAILABLE.withDescription(
+                            "NameResolver returned no usable address. " + resolvedAddresses);
+            handleNameResolutionError(unavailable);
+            return unavailable;
+        }
         Object policyConfig = resolvedAddresses.getLoadBalancingPolicyConfig();
         if (policyConfig instanceof PeakEwmaConfig parsed) {
             // Service-config path: gRPC hands back what the provider's
@@ -107,10 +130,12 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         ensureOutlierTicker();
 
         publishPicker();
+        return Status.OK;
     }
 
     @Override
     public void shutdown() {
+        shutdown = true;
         stopOutlierTicker();
         for (Subchannel sc : tables.keySet()) {
             try {
@@ -144,11 +169,21 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 return;
             }
             long periodMs = Math.max(100L, config.outlierTickIntervalMillis);
+            if (outlierTask != null && !outlierTask.isDone() && outlierTaskPeriodMs == periodMs) {
+                return; // already running at this period; rescheduling would reset its delay
+            }
             cancelOutlierTaskLocked();
+            outlierTaskPeriodMs = periodMs;
+            // The timer only fires; the tick itself runs on the synchronization context, like
+            // every other mutation of balancer state and every Subchannel call.
+            SynchronizationContext syncContext = helper.getSynchronizationContext();
             outlierTask =
                     helper.getScheduledExecutorService()
                             .scheduleAtFixedRate(
-                                    this::outlierTick, periodMs, periodMs, TimeUnit.MILLISECONDS);
+                                    () -> syncContext.execute(this::outlierTick),
+                                    periodMs,
+                                    periodMs,
+                                    TimeUnit.MILLISECONDS);
         } finally {
             outlierLock.unlock();
         }
@@ -172,6 +207,9 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
     }
 
     private void outlierTick() {
+        if (shutdown) {
+            return;
+        }
         try {
             PeakEwmaConfig ewmaConfig = cfg.get();
             if (!ewmaConfig.outlierEnabled) {
@@ -582,12 +620,31 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             }
         }
 
-        if (lastPublishedState != ConnectivityState.CONNECTING) {
-            lastReadyHash = "";
-            lastWasReady = false;
-            lastPublishedState = ConnectivityState.CONNECTING;
-            safeUpdate(ConnectivityState.CONNECTING, new NoResultPicker());
+        // Aggregate like round_robin: CONNECTING while any subchannel may still connect,
+        // otherwise TRANSIENT_FAILURE with a picker that fails non-wait-for-ready RPCs fast.
+        boolean anyConnecting = false;
+        for (Subchannel sc : tables.keySet()) {
+            ConnectivityState cs = subchannelConn.getOrDefault(sc, ConnectivityState.IDLE);
+            if (cs == ConnectivityState.CONNECTING || cs == ConnectivityState.IDLE) {
+                anyConnecting = true;
+                break;
+            }
         }
+        if (anyConnecting) {
+            if (lastPublishedState != ConnectivityState.CONNECTING) {
+                publishNotReady(ConnectivityState.CONNECTING, new NoResultPicker());
+            }
+        } else if (lastPublishedState != TRANSIENT_FAILURE) {
+            publishNotReady(TRANSIENT_FAILURE, errorPicker(lastTransientFailure));
+        }
+    }
+
+    /** Publishes a non-READY state and forgets the ready-set hash so READY gets republished. */
+    private void publishNotReady(ConnectivityState state, SubchannelPicker picker) {
+        lastReadyHash = "";
+        lastWasReady = false;
+        lastPublishedState = state;
+        safeUpdate(state, picker);
     }
 
     private void emitReadySubchannelMetrics(
@@ -720,11 +777,36 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         @Override
         public void onSubchannelState(ConnectivityStateInfo stateInfo) {
             ConnectivityState connectivityState = stateInfo.getState();
-            subchannelConn.put(subchannel, connectivityState);
+            // Removed (or balancer shut down): gRPC still delivers the final SHUTDOWN state.
+            // Recording it would re-insert the dead subchannel into subchannelConn forever.
+            if (shutdown
+                    || connectivityState == ConnectivityState.SHUTDOWN
+                    || !tables.containsKey(subchannel)) {
+                return;
+            }
+
+            ConnectivityState previous = subchannelConn.get(subchannel);
+            if (connectivityState == TRANSIENT_FAILURE) {
+                lastTransientFailure = stateInfo.getStatus();
+                helper.refreshNameResolution();
+            }
+            // Sticky TRANSIENT_FAILURE (as pick_first does): a subchannel retrying after backoff
+            // reports CONNECTING, but it stays "failed" for aggregation until it is READY again.
+            ConnectivityState effective =
+                    (previous == TRANSIENT_FAILURE && connectivityState == CONNECTING)
+                            ? TRANSIENT_FAILURE
+                            : connectivityState;
+            subchannelConn.put(subchannel, effective);
 
             SubchannelState subchannelState = states.get(subchannel);
             if (subchannelState != null && connectivityState == ConnectivityState.READY) {
                 subchannelState.markReady(clocks.nanoTime());
+            }
+            if (connectivityState == ConnectivityState.IDLE) {
+                // Subchannels don't reconnect on their own once a connection closes (GOAWAY,
+                // max connection age, idle timeout); the policy must ask.
+                helper.refreshNameResolution();
+                subchannel.requestConnection();
             }
             publishPicker();
         }

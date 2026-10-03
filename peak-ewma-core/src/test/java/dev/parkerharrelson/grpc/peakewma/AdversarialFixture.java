@@ -317,6 +317,13 @@ final class AdversarialFixture {
         }
 
         @Override
+        public void refreshNameResolution() {
+
+            // real channels re-resolve; nothing to do in tests
+
+        }
+
+        @Override
         public SynchronizationContext getSynchronizationContext() {
             Runnable hook = onTickGetsSyncContext;
             if (hook != null && IN_TICK.get()) {
