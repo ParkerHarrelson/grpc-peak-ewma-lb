@@ -33,9 +33,13 @@ import org.junit.jupiter.api.Test;
  * peak_ewma_p2c} and grpc's built-in {@code round_robin}; the assertion is on peak_ewma_p2c, and
  * the round_robin numbers are printed as the baseline.
  *
- * <p>Run: {@code ./mvnw -pl peak-ewma-harness -am test -Padversarial}
+ * <p>Run: {@code ./mvnw -pl peak-ewma-harness -am test -Pperf}
  */
-@Tag("adversarial")
+/**
+ * All scenarios pass as of the contract + scoring fixes; timing-sensitive, so they run in the perf
+ * job.
+ */
+@Tag("perf")
 class AdversarialEndToEndTest {
 
     private static final String PEAK = "peak_ewma_p2c";

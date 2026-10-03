@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Test;
  * Discrete-event simulations through the real balancer, picker and stream tracers on a fake clock.
  * Deterministic, and minutes of traffic run in milliseconds.
  */
-@Tag("adversarial")
 class AdversarialSimulationTest {
 
     private static final PeakEwmaConfig CFG = PeakEwmaConfig.DEFAULTS;
@@ -180,6 +179,7 @@ class AdversarialSimulationTest {
      * README promises outlier ejection "if a backend crosses outlierErrorRate".
      */
     @Test
+    @Tag("adversarial") // still failing: tracked issue open
     void erroringBackend_isEjected_inFourNodeFleet() {
         AdversarialFixture f = fleet(4, 10.0);
         f.run(400, 10_000, METHOD_A);
@@ -209,6 +209,7 @@ class AdversarialSimulationTest {
      * per-method design is defeated because tryEjectForMethod sets subchannelState.ejectUntil.
      */
     @Test
+    @Tag("adversarial") // still failing: tracked issue open
     void singleSlowCallOnOneMethod_doesNotEjectBackendForOtherMethods() {
         AdversarialFixture f = fleet(10, 5.0);
         f.run(1000, 120_000, METHOD_A, METHOD_B); // long enough for the slow EWMA to converge
@@ -238,6 +239,7 @@ class AdversarialSimulationTest {
      * fast/slow ratio ejects the whole backend.
      */
     @Test
+    @Tag("adversarial") // still failing: tracked issue open
     void longLivedStream_doesNotEjectBackend() {
         AdversarialFixture f = fleet(10, 5.0);
         f.run(2000, 10_000, METHOD_A, METHOD_B);
@@ -270,6 +272,7 @@ class AdversarialSimulationTest {
      * allocates per-backend state for methods the backend never served.
      */
     @Test
+    @Tag("adversarial") // still failing: tracked issue open
     void pick_doesNotCreateStateOnUnpickedBackends() {
         AdversarialFixture f = fleet(50, 5.0);
         f.pick(AdversarialFixture.method("svc/NeverCalledBefore"));
