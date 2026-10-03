@@ -18,6 +18,12 @@ import java.util.concurrent.ThreadLocalRandom;
 public final class P2CPicker extends SubchannelPicker {
     private static final double EPS = 1e-6;
 
+    /**
+     * Resamples allowed to replace an ejected peer before falling back to a full scan. Ejection is
+     * capped at 50% of the fleet, so the fallback runs for at most ~0.5^8 = 0.4% of picks.
+     */
+    private static final int MAX_RESAMPLES = 8;
+
     private final List<LoadBalancer.Subchannel> readyPool;
     private final Map<LoadBalancer.Subchannel, MethodTable> tables;
     private final Map<LoadBalancer.Subchannel, SubchannelState> states;
@@ -105,9 +111,12 @@ public final class P2CPicker extends SubchannelPicker {
         final long now = clocks.nanoTime();
         final int n = readyPool.size();
 
-        // Fast path, O(1): sample two distinct peers and score only those. Retry a couple of
-        // times if both happen to be ejected; only fall back to scanning the whole pool when
-        // ejections are dense enough that random sampling keeps missing.
+        // Fast path, O(1): sample two distinct peers and score only those. An ejected sample is
+        // replaced by resampling just that slot, so every pick is still a best-of-two
+        // comparison between live peers. Accepting the surviving peer unopposed would turn
+        // ~2e of picks into a plain random choice when a fraction e of the fleet is ejected.
+        // Only when resampling keeps missing (very dense ejection, or tiny pools) do we fall
+        // back to scanning the whole pool.
         if (n == 1) {
             LoadBalancer.Subchannel only = readyPool.get(0);
             if (!Double.isInfinite(cost(only, method, now))) {
@@ -116,39 +125,47 @@ public final class P2CPicker extends SubchannelPicker {
             }
         } else {
             ThreadLocalRandom rnd = ThreadLocalRandom.current();
-            for (int attempt = 0; attempt < 3; attempt++) {
-                // Uniform over ordered pairs of distinct indices.
-                int i1 = rnd.nextInt(n);
-                int i2 = rnd.nextInt(n - 1);
-                if (i2 >= i1) i2++;
-                LoadBalancer.Subchannel a = readyPool.get(i1);
-                LoadBalancer.Subchannel b = readyPool.get(i2);
-                double ca = cost(a, method, now);
-                double cb = cost(b, method, now);
-                boolean fa = !Double.isInfinite(ca);
-                boolean fb = !Double.isInfinite(cb);
-                if (fa || fb) {
-                    LoadBalancer.Subchannel chosen;
-                    if (fa && fb) {
-                        // Sub-promille jitter breaks exact ties so identical peers don't
-                        // lock-step onto one subchannel.
-                        chosen =
-                                ca * (1.0 + 1e-4 * rnd.nextDouble())
-                                                <= cb * (1.0 + 1e-4 * rnd.nextDouble())
-                                        ? a
-                                        : b;
-                    } else {
-                        chosen = fa ? a : b;
-                    }
-                    metrics.recordPick(OK);
-                    return buildPickResult(chosen, method);
+            // Uniform over ordered pairs of distinct indices.
+            int i1 = rnd.nextInt(n);
+            int i2 = rnd.nextInt(n - 1);
+            if (i2 >= i1) i2++;
+            double ca = cost(readyPool.get(i1), method, now);
+            double cb = cost(readyPool.get(i2), method, now);
+            for (int attempt = 0;
+                    attempt < MAX_RESAMPLES && (Double.isInfinite(ca) || Double.isInfinite(cb));
+                    attempt++) {
+                if (Double.isInfinite(ca)) {
+                    i1 = otherIndex(rnd, n, i2);
+                    ca = cost(readyPool.get(i1), method, now);
+                } else {
+                    i2 = otherIndex(rnd, n, i1);
+                    cb = cost(readyPool.get(i2), method, now);
                 }
+            }
+            if (!Double.isInfinite(ca) && !Double.isInfinite(cb)) {
+                // Sub-promille jitter breaks exact ties so identical peers don't lock-step
+                // onto one subchannel.
+                LoadBalancer.Subchannel chosen =
+                        ca * (1.0 + 1e-4 * rnd.nextDouble()) <= cb * (1.0 + 1e-4 * rnd.nextDouble())
+                                ? readyPool.get(i1)
+                                : readyPool.get(i2);
+                metrics.recordPick(OK);
+                return buildPickResult(chosen, method);
             }
         }
         return pickByScan(method, now, n);
     }
 
-    /** Slow path: score every peer. Only reached when the sampled peers were all ejected. */
+    /** A uniformly random index in [0, n) other than {@code exclude}; requires n >= 2. */
+    private static int otherIndex(ThreadLocalRandom rnd, int n, int exclude) {
+        int i = rnd.nextInt(n - 1);
+        return i >= exclude ? i + 1 : i;
+    }
+
+    /**
+     * Slow path: score every peer, then best-of-two among the live ones. Only reached when
+     * resampling could not find two live peers.
+     */
     private PickResult pickByScan(String method, long now, int n) {
         int[] idx = new int[n];
         double[] costs = new double[n];

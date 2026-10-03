@@ -311,6 +311,55 @@ class P2CPickerTest {
         assertEquals(20, winsFinite, "only finite peer should be selectable");
     }
 
+    /**
+     * With most of the pool ejected, every pick must still compare two LIVE peers. The worst live
+     * peer loses to both others, so true best-of-two never selects it. (Accepting the survivor of a
+     * pair that contains an ejected peer would let it win ~2e of the time.)
+     */
+    @Test
+    void denseEjection_stillComparesTwoLivePeers_worstLivePeerNeverWins() {
+        String method = "svc/Dense";
+        List<LoadBalancer.Subchannel> pool = new java.util.ArrayList<>();
+        Map<LoadBalancer.Subchannel, MethodTable> tables = new java.util.HashMap<>();
+        Map<LoadBalancer.Subchannel, SubchannelState> states = new java.util.HashMap<>();
+        long[] liveRttMicros = {5_000, 10_000, 40_000};
+        FakeSubchannel best = null, middle = null, worst = null;
+        for (int i = 0; i < 10; i++) {
+            FakeSubchannel sc = new FakeSubchannel(6500 + i);
+            MethodTable mt = new MethodTable(cfg, t.clocks);
+            SubchannelState st = new SubchannelState();
+            st.markReady(t.nowNanos() - TimeUnit.SECONDS.toNanos(60)); // past warmup
+            if (i < liveRttMicros.length) {
+                sample(t, mt, method, cfg, liveRttMicros[i]);
+                if (i == 0) best = sc;
+                if (i == 1) middle = sc;
+                if (i == 2) worst = sc;
+            } else {
+                sample(t, mt, method, cfg, 1_000); // would be cheapest, but ejected
+                mt.ejectMethodUntil(method, t.nowNanos() + TimeUnit.SECONDS.toNanos(60));
+            }
+            pool.add(sc);
+            tables.put(sc, mt);
+            states.put(sc, st);
+        }
+        P2CPicker picker =
+                new P2CPicker(pool, tables, states, cfg, t.clocks, NoopLbMetrics.INSTANCE);
+
+        Map<LoadBalancer.Subchannel, Integer> wins = new java.util.HashMap<>();
+        int picks = 6_000;
+        for (int i = 0; i < picks; i++) {
+            wins.merge(picker.pickSubchannel(args(md(method))).getSubchannel(), 1, Integer::sum);
+        }
+        assertEquals(0, wins.getOrDefault(worst, 0), "worst live peer won: " + wins);
+        for (int i = 3; i < 10; i++) {
+            assertEquals(0, wins.getOrDefault(pool.get(i), 0), "ejected peer was picked");
+        }
+        // Pairs among live peers: (best,middle)->best, (best,worst)->best, (middle,worst)->middle.
+        double bestShare = wins.getOrDefault(best, 0) / (double) picks;
+        assertTrue(bestShare > 0.60 && bestShare < 0.73, "best share " + bestShare);
+        assertTrue(wins.getOrDefault(middle, 0) > 0);
+    }
+
     @Test
     void methodEjection_allFiniteBecomesInfinite_thenBaselineFallbackChoosesBest() {
         String method = "svc/C";
