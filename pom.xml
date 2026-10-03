@@ -38,6 +38,9 @@
 
         <!-- In-process benchmark/test rig. Not published. -->
         <module>peak-ewma-harness</module>
+
+        <!-- JMH + overhead benchmarks vs grpc-java's built-in policies. Not published. -->
+        <module>peak-ewma-bench</module>
     </modules>
 
     <properties>
@@ -54,6 +57,7 @@
         <assertj.version>3.26.3</assertj.version>
 
         <spotless.version>3.9.0</spotless.version>
+        <jmh.version>1.37</jmh.version>
     </properties>
 
     <dependencyManagement>

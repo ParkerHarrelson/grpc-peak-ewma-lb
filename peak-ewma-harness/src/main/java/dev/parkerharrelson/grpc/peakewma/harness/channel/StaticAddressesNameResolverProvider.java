@@ -59,6 +59,14 @@ public final class StaticAddressesNameResolverProvider extends NameResolverProvi
         TARGETS.remove(name);
     }
 
+    /** Pushes a resolution error to the live listener, as a failing DNS lookup would. */
+    public static void fail(String name, Status error) {
+        RegisteredTarget t = TARGETS.get(name);
+        if (t == null) return;
+        NameResolver.Listener2 l = t.listener.get();
+        if (l != null) l.onError(error);
+    }
+
     /** Pokes registered listeners to re-resolve without changing the address list. */
     public static void refresh(String name) {
         RegisteredTarget t = TARGETS.get(name);
