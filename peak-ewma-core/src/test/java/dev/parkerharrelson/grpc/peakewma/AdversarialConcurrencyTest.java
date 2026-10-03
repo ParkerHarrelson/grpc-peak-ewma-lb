@@ -25,11 +25,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /** Multi-threaded stress against the real balancer and its shared mutable state. */
-@Tag("adversarial")
 class AdversarialConcurrencyTest {
 
     private static final PeakEwmaConfig CFG = PeakEwmaConfig.DEFAULTS;

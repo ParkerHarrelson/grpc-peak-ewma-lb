@@ -9,7 +9,6 @@ import io.grpc.ConnectivityStateInfo;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.Status;
 import java.util.Map;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -17,7 +16,6 @@ import org.junit.jupiter.api.Test;
  * (pick_first, round_robin, least_request, ...) follows. Each test asserts the CORRECT behaviour; a
  * failure means the bug is present.
  */
-@Tag("adversarial")
 class AdversarialLbContractTest {
 
     private static final PeakEwmaConfig CFG = PeakEwmaConfig.DEFAULTS;
