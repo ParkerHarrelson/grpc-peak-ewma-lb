@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.LongAdder;
  * <pre>
  * java -cp peak-ewma-bench/target/benchmarks.jar dev.parkerharrelson.grpc.peakewma.bench.OverheadReport \
  *     [--seconds 10] [--warmup 5] [--threads 8] [--sizes 3,10,100,500] [--policies a,b] \
- *     [--out target/overhead-report.md] [--skip-quality]
+ *     [--repeats 1] [--out target/overhead-report.md] [--skip-quality]
  * </pre>
  */
 public final class OverheadReport {
@@ -61,6 +61,7 @@ public final class OverheadReport {
         int seconds = Integer.parseInt(a.getOrDefault("seconds", "10"));
         int warmup = Integer.parseInt(a.getOrDefault("warmup", "5"));
         int threads = Integer.parseInt(a.getOrDefault("threads", "8"));
+        int repeats = Math.max(1, Integer.parseInt(a.getOrDefault("repeats", "1")));
         List<Integer> sizes =
                 Arrays.stream(a.getOrDefault("sizes", "3,10,100,500").split(","))
                         .map(Integer::parseInt)
@@ -76,60 +77,74 @@ public final class OverheadReport {
                 .append(
                         String.format(
                                 "JVM %s, %d CPUs, %s %s. Closed loop, %d caller threads, %ds warmup"
-                                        + " + %ds measured per row, fresh JVM per row, in-process"
-                                        + " transport, zero-latency backends.%n%n",
+                                        + " + %ds measured per run, fresh JVM per run, in-process"
+                                        + " transport, zero-latency backends. %s%n%n",
                                 System.getProperty("java.version"),
                                 Runtime.getRuntime().availableProcessors(),
                                 System.getProperty("os.name"),
                                 System.getProperty("os.arch"),
                                 threads,
                                 warmup,
-                                seconds));
+                                seconds,
+                                repeats == 1
+                                        ? "Single run per row (no error bars)."
+                                        : repeats
+                                                + " runs per row, interleaved across policies;"
+                                                + " values are mean ± 95% CI. A Δ marked"
+                                                + " \"n.s.\" is not significant (Welch t-test,"
+                                                + " p≥0.05)."));
 
         for (int n : sizes) {
-            List<Map<String, String>> rows = new ArrayList<>();
-            for (String p : policies) {
-                System.err.printf("[overhead] %s backends=%d ...%n", p, n);
-                Map<String, String> r =
-                        runChild(
-                                List.of(
-                                        "--child",
-                                        "",
-                                        "--policy",
-                                        p,
-                                        "--backends",
-                                        "" + n,
-                                        "--seconds",
-                                        "" + seconds,
-                                        "--warmup",
-                                        "" + warmup,
-                                        "--threads",
-                                        "" + threads));
-                r.put("policy", p);
-                rows.add(r);
+            Map<String, List<Map<String, String>>> runs = new LinkedHashMap<>();
+            // Interleave: every policy once per repeat, so drift (thermal, background load)
+            // affects all policies equally instead of biasing whichever ran last.
+            for (int r = 1; r <= repeats; r++) {
+                for (String p : policies) {
+                    System.err.printf(
+                            "[overhead] %s backends=%d run %d/%d ...%n", p, n, r, repeats);
+                    runs.computeIfAbsent(p, k -> new ArrayList<>())
+                            .add(
+                                    runChild(
+                                            List.of(
+                                                    "--child",
+                                                    "",
+                                                    "--policy",
+                                                    p,
+                                                    "--backends",
+                                                    "" + n,
+                                                    "--seconds",
+                                                    "" + seconds,
+                                                    "--warmup",
+                                                    "" + warmup,
+                                                    "--threads",
+                                                    "" + threads)));
+                }
             }
-            md.append(overheadTable(n, rows)).append('\n');
-            System.out.println(overheadTable(n, rows));
+            String table = overheadTable(n, runs);
+            md.append(table).append('\n');
+            System.out.println(table);
         }
 
         if (!a.containsKey("skip-quality")) {
-            List<Map<String, String>> rows = new ArrayList<>();
-            for (String p : policies) {
-                System.err.printf("[quality] %s ...%n", p);
-                Map<String, String> r =
-                        runChild(
-                                List.of(
-                                        "--quality-child",
-                                        "",
-                                        "--policy",
-                                        p,
-                                        "--seconds",
-                                        "" + Math.max(seconds, 15)));
-                r.put("policy", p);
-                rows.add(r);
+            Map<String, List<Map<String, String>>> runs = new LinkedHashMap<>();
+            for (int r = 1; r <= repeats; r++) {
+                for (String p : policies) {
+                    System.err.printf("[quality] %s run %d/%d ...%n", p, r, repeats);
+                    runs.computeIfAbsent(p, k -> new ArrayList<>())
+                            .add(
+                                    runChild(
+                                            List.of(
+                                                    "--quality-child",
+                                                    "",
+                                                    "--policy",
+                                                    p,
+                                                    "--seconds",
+                                                    "" + Math.max(seconds, 15))));
+                }
             }
-            md.append(qualityTable(rows));
-            System.out.println(qualityTable(rows));
+            String table = qualityTable(runs);
+            md.append(table);
+            System.out.println(table);
         }
 
         Files.createDirectories(out.toAbsolutePath().getParent());
@@ -166,53 +181,43 @@ public final class OverheadReport {
         return result;
     }
 
-    private static String overheadTable(int n, List<Map<String, String>> rows) {
-        Map<String, String> rr =
-                rows.stream()
-                        .filter(r -> "round_robin".equals(r.get("policy")))
-                        .findFirst()
-                        .orElse(null);
+    private static String overheadTable(int n, Map<String, List<Map<String, String>>> runs) {
+        List<Map<String, String>> rr = runs.get("round_robin");
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("## %d backends%n%n", n));
         sb.append(
                 "| policy | RPC/s | CPU µs/RPC | Δ CPU vs RR | alloc B/RPC | Δ alloc vs RR"
                         + " | retained heap (KB) | GC ms/s | p50 µs | p99 µs |\n");
         sb.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
-        for (Map<String, String> r : rows) {
-            if (r.containsKey("error")) {
-                sb.append(String.format("| %s | %s |||||||||%n", r.get("policy"), r.get("error")));
+        for (var e : runs.entrySet()) {
+            List<Map<String, String>> r = e.getValue();
+            if (r.stream().anyMatch(m -> m.containsKey("error"))) {
+                sb.append(String.format("| %s | child failed |||||||||%n", e.getKey()));
                 continue;
             }
-            double cpu = d(r, "cpuNsPerRpc") / 1000.0;
-            double alloc = d(r, "allocBytesPerRpc");
-            String dCpu =
-                    rr == null || rr.containsKey("error")
-                            ? ""
-                            : pct(cpu, d(rr, "cpuNsPerRpc") / 1000.0);
-            String dAlloc =
-                    rr == null || rr.containsKey("error")
-                            ? ""
-                            : pct(alloc, d(rr, "allocBytesPerRpc"));
+            Stat cpu = Stat.of(r, "cpuNsPerRpc", 1e-3);
+            Stat alloc = Stat.of(r, "allocBytesPerRpc", 1);
+            boolean haveRr =
+                    rr != null && r != rr && rr.stream().noneMatch(m -> m.containsKey("error"));
             sb.append(
                     String.format(
                             Locale.ROOT,
-                            "| %s | %,.0f | %.2f | %s | %,.0f | %s | %,.0f | %.1f | %.0f | %.0f"
-                                    + " |%n",
-                            r.get("policy"),
-                            d(r, "rps"),
-                            cpu,
-                            dCpu,
-                            alloc,
-                            dAlloc,
-                            d(r, "retainedHeapBytes") / 1024.0,
-                            d(r, "gcMsPerSec"),
-                            d(r, "p50us"),
-                            d(r, "p99us")));
+                            "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |%n",
+                            e.getKey(),
+                            Stat.of(r, "rps", 1).fmt("%,.0f"),
+                            cpu.fmt("%.2f"),
+                            haveRr ? cpu.delta(Stat.of(rr, "cpuNsPerRpc", 1e-3)) : "baseline",
+                            alloc.fmt("%,.0f"),
+                            haveRr ? alloc.delta(Stat.of(rr, "allocBytesPerRpc", 1)) : "baseline",
+                            Stat.of(r, "retainedHeapBytes", 1.0 / 1024).fmt("%,.0f"),
+                            Stat.of(r, "gcMsPerSec", 1).fmt("%.1f"),
+                            Stat.of(r, "p50us", 1).fmt("%.0f"),
+                            Stat.of(r, "p99us", 1).fmt("%.0f")));
         }
         return sb.toString();
     }
 
-    private static String qualityTable(List<Map<String, String>> rows) {
+    private static String qualityTable(Map<String, List<Map<String, String>>> runs) {
         StringBuilder sb = new StringBuilder();
         sb.append("## Routing quality: 10 backends @ 2 ms, b0 slow (20 ms), b1 fails instantly\n\n")
                 .append(
@@ -220,27 +225,74 @@ public final class OverheadReport {
                                 + " better.\n\n")
                 .append(
                         "| policy | RPC/s | success % | p50 µs (ok) | p99 µs (ok) | share b0 (slow)"
-                                + " | share b1 (failing) | share min..max of healthy |\n")
+                                + " % | share b1 (failing) % | share min..max of healthy |\n")
                 .append("|---|---:|---:|---:|---:|---:|---:|---|\n");
-        for (Map<String, String> r : rows) {
-            if (r.containsKey("error")) {
-                sb.append(String.format("| %s | %s |||||||%n", r.get("policy"), r.get("error")));
+        for (var e : runs.entrySet()) {
+            List<Map<String, String>> r = e.getValue();
+            if (r.stream().anyMatch(m -> m.containsKey("error"))) {
+                sb.append(String.format("| %s | child failed |||||||%n", e.getKey()));
                 continue;
             }
             sb.append(
                     String.format(
                             Locale.ROOT,
-                            "| %s | %,.0f | %.1f | %.0f | %.0f | %.1f%% | %.1f%% | %s |%n",
-                            r.get("policy"),
-                            d(r, "rps"),
-                            d(r, "successPct"),
-                            d(r, "p50us"),
-                            d(r, "p99us"),
-                            d(r, "shareSlow"),
-                            d(r, "shareFailing"),
-                            r.get("healthyShareRange")));
+                            "| %s | %s | %s | %s | %s | %s | %s | %s |%n",
+                            e.getKey(),
+                            Stat.of(r, "rps", 1).fmt("%,.0f"),
+                            Stat.of(r, "successPct", 1).fmt("%.1f"),
+                            Stat.of(r, "p50us", 1).fmt("%.0f"),
+                            Stat.of(r, "p99us", 1).fmt("%.0f"),
+                            Stat.of(r, "shareSlow", 1).fmt("%.1f"),
+                            Stat.of(r, "shareFailing", 1).fmt("%.1f"),
+                            r.get(r.size() - 1).get("healthyShareRange")));
         }
         return sb.toString();
+    }
+
+    /** Mean, sample SD and 95% CI of one metric across repeated runs. */
+    record Stat(double mean, double sd, int n) {
+        // Two-sided 97.5% Student t quantiles for df = 1..30.
+        private static final double[] T975 = {
+            12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179,
+            2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064,
+            2.060, 2.056, 2.052, 2.048, 2.045, 2.042
+        };
+
+        static Stat of(List<Map<String, String>> runs, String key, double scale) {
+            double[] v = runs.stream().mapToDouble(m -> d(m, key) * scale).toArray();
+            double mean = Arrays.stream(v).average().orElse(0);
+            double ss = Arrays.stream(v).map(x -> (x - mean) * (x - mean)).sum();
+            return new Stat(mean, v.length > 1 ? Math.sqrt(ss / (v.length - 1)) : 0, v.length);
+        }
+
+        static double t(int df) {
+            return df <= 0 ? Double.NaN : df <= T975.length ? T975[df - 1] : 1.96;
+        }
+
+        double halfWidth() {
+            return n > 1 ? t(n - 1) * sd / Math.sqrt(n) : Double.NaN;
+        }
+
+        String fmt(String f) {
+            String m = String.format(Locale.ROOT, f, mean);
+            return n > 1 ? m + " ± " + String.format(Locale.ROOT, f, halfWidth()) : m;
+        }
+
+        /**
+         * Relative difference vs {@code base}, marked n.s. if a Welch t-test can't separate them.
+         */
+        String delta(Stat base) {
+            if (base.mean <= 0) return "";
+            String pct =
+                    String.format(Locale.ROOT, "%+.0f%%", 100.0 * (mean - base.mean) / base.mean);
+            if (n < 2 || base.n < 2) return pct;
+            double va = sd * sd / n, vb = base.sd * base.sd / base.n;
+            double se = Math.sqrt(va + vb);
+            if (se == 0) return pct;
+            double df = (va + vb) * (va + vb) / (va * va / (n - 1) + vb * vb / (base.n - 1));
+            boolean significant = Math.abs(mean - base.mean) / se > t((int) Math.floor(df));
+            return significant ? pct : pct + " (n.s.)";
+        }
     }
 
     // ------------------------------------------------------------------ overhead child
@@ -448,10 +500,5 @@ public final class OverheadReport {
 
     private static double d(Map<String, String> m, String k) {
         return Double.parseDouble(m.getOrDefault(k, "0"));
-    }
-
-    private static String pct(double v, double base) {
-        if (base <= 0) return "";
-        return String.format(Locale.ROOT, "%+.0f%%", 100.0 * (v - base) / base);
     }
 }
