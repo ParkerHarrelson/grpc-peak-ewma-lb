@@ -10,6 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+#   SKIP_OVERHEAD=1 ...                         # reuse an existing overhead.md in OUT
 #   JAR=/path/benchmarks.jar OUT=dir ...       # use a pre-built (e.g. frozen copy) jar, skip the build
 if [[ -z "${JAR:-}" ]]; then
   ./mvnw -B -q ${MVN_ARGS:-} package -pl peak-ewma-bench -am -DskipTests -Dspotless.check.skip=true
@@ -30,9 +31,9 @@ else
   RPC_SIZES=()
 fi
 
-java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.OverheadReport "${OVERHEAD[@]}" --out "$OUT/overhead.md"
-java -jar "$JAR" 'PickerBenchmark' "${JMH[@]}" "${PICK_SIZES[@]}" -prof gc -rf csv -rff "$OUT/picker.csv"
-java -jar "$JAR" 'RpcBenchmark' "${JMH[@]}" "${RPC_SIZES[@]}" -prof gc -rf csv -rff "$OUT/rpc.csv"
+[[ "${SKIP_OVERHEAD:-0}" == "1" ]] || java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.OverheadReport ${OVERHEAD[@]+"${OVERHEAD[@]}"} --out "$OUT/overhead.md"
+java -jar "$JAR" 'PickerBenchmark' ${JMH[@]+"${JMH[@]}"} ${PICK_SIZES[@]+"${PICK_SIZES[@]}"} -prof gc -rf csv -rff "$OUT/picker.csv"
+java -jar "$JAR" 'RpcBenchmark' ${JMH[@]+"${JMH[@]}"} ${RPC_SIZES[@]+"${RPC_SIZES[@]}"} -prof gc -rf csv -rff "$OUT/rpc.csv"
 java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.JmhReport "$OUT/picker.csv" "$OUT/picker.md" >/dev/null
 java -cp "$JAR" dev.parkerharrelson.grpc.peakewma.bench.JmhReport "$OUT/rpc.csv" "$OUT/rpc.md" >/dev/null
 
