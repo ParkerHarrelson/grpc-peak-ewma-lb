@@ -57,14 +57,20 @@ final class PeakEwmaTuner {
         return Math.max(1L, (long) Math.rint(scale.tauSlowMillis() * noise));
     }
 
+    /**
+     * Samples before a peer's EWMAs are trusted for outlier decisions: half the peak memory ({@link
+     * MethodScale#PEAK_MEMORY_SAMPLES}), enough for the smoothed value to reflect the peer rather
+     * than its first few calls. Dimensionless, so the same at any request rate.
+     */
+    static final int WARM_SAMPLES = (int) (MethodScale.PEAK_MEMORY_SAMPLES / 2);
+
     static int minSamplesForRatioEff(double lambdaPerSec) {
-        int v = (int) Math.ceil(6.0 * log2(lambdaPerSec + 1.0));
-        return clamp(v, 2, 16);
+        return WARM_SAMPLES;
     }
 
+    /** No separate time gate: counting samples already says how much evidence there is. */
     static long minWarmupMillisForRatioEff(double lambdaPerSec) {
-        long v = (long) Math.rint(1200.0 / Math.max(0.05, lambdaPerSec));
-        return clamp(v);
+        return 0L;
     }
 
     /**
@@ -110,9 +116,15 @@ final class PeakEwmaTuner {
         return Math.max(0.0, (centre - margin) / (1 + z2 / n));
     }
 
+    /**
+     * At most a fifth of the fleet may be ejected at once (but always at least one peer, see {@link
+     * #maxEjectedCountEff}), so outlier detection can never take out most of the capacity even if
+     * many peers look bad together, e.g. during a shared dependency outage.
+     */
+    static final int MAX_EJECTION_PERCENT = 20;
+
     static int maxEjectionPercentEff(int readyCount) {
-        int v = (int) Math.round(10 + 5 * log2(Math.max(1.0, readyCount)));
-        return clamp(v, 10, 50);
+        return MAX_EJECTION_PERCENT;
     }
 
     /**
@@ -127,20 +139,22 @@ final class PeakEwmaTuner {
     }
 
     /** Peers that must stay in rotation after an ejection; never more than readyCount - 1. */
+    /** Peers that stay in rotation: whatever the ejection cap leaves (never fewer than one). */
     static int minReadyAfterEjectEff(int readyCount) {
-        int v = (int) Math.ceil(minReadyFractionAfterEjectEff(readyCount) * readyCount);
-        return Math.min(v, Math.max(1, readyCount - 1));
+        return Math.max(1, readyCount - maxEjectedCountEff(readyCount));
     }
 
     static double minReadyFractionAfterEjectEff(int readyCount) {
-        double v = 0.7 - 0.05 * log2(Math.max(1.0, readyCount));
-        return clamp(v, 0.4, 0.7);
+        return readyCount <= 0 ? 1.0 : (double) minReadyAfterEjectEff(readyCount) / readyCount;
     }
 
+    /**
+     * How many times slower than the fleet median a peer must be to be ejected for latency: the
+     * configured multiplier, raised for noisy methods so the threshold always sits beyond two
+     * standard deviations of normal variation (1 + 2 x CV).
+     */
     static double latencyMultiplierEff(double coeffVar, PeakEwmaConfig cfg) {
-        if (coeffVar < 0.20) return Math.max(2.0, cfg.outlierLatencyMultiplier - 0.5);
-        if (coeffVar > 0.50) return Math.min(3.5, cfg.outlierLatencyMultiplier + 1.0);
-        return cfg.outlierLatencyMultiplier;
+        return Math.max(cfg.outlierLatencyMultiplier, 1.0 + 2.0 * coeffVar);
     }
 
     private static double clamp(double v, double min, double max) {
