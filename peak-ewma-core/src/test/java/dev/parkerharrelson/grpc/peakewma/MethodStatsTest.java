@@ -127,14 +127,75 @@ class MethodStatsTest {
         assertEquals(samples, ms.getSamples());
         assertEquals(t, ms.getLastUpdateNanos());
 
-        // 100 us later again, a SLOWER call: raises the peak -> always applied.
+        // 100 us later again, a SLOWER call: raises the peak -> applied to the peak only. The
+        // smoothed stats are not due yet, and must not see it: letting through only the samples
+        // that raise the peak would bias them upward (#96).
+        double slow = ms.getEwmaSlowMicros();
+        double mean = ms.getRttMeanMicros();
         ms.update(t + 200_000L, 9_000_000L, cfg);
         assertEquals(9_000.0, ms.getEwmaFastMicros(), 1e-6);
-        assertEquals(samples + 1, ms.getSamples());
+        assertEquals(samples, ms.getSamples());
+        assertEquals(slow, ms.getEwmaSlowMicros(), 1e-9);
+        assertEquals(mean, ms.getRttMeanMicros(), 1e-9);
+        assertEquals(t + 200_000L, ms.getLastUpdateNanos());
 
-        // >= 1 ms after the last write, a fast call is applied to feed the smoothed stats.
-        ms.update(t + 200_000L + MethodStats.minSmoothingIntervalNanos, 4_000_000L, cfg);
-        assertEquals(samples + 2, ms.getSamples());
+        // >= 1 ms after the last SMOOTHED write, any call (here a fast one) feeds them.
+        ms.update(t + MethodStats.minSmoothingIntervalNanos, 4_000_000L, cfg);
+        assertEquals(samples + 1, ms.getSamples());
+    }
+
+    /**
+     * #96: write thinning must not bias the smoothed statistics. Exponential RTTs (mean 1 ms, CV 1)
+     * arriving every 20 us (50k/s per backend and method): the old thinning, which let through only
+     * samples that raised the peak, drove the mean to ~3x the truth.
+     */
+    @Test
+    void thinning_keepsSmoothedStatsUnbiased_atHighRates() {
+        MethodStats thinned = runExponential(MethodStats.minSmoothingIntervalNanos);
+        MethodStats exact = runExponential(0L);
+        assertEquals(1_000.0, thinned.getRttMeanMicros(), 100.0, "mean vs truth");
+        assertEquals(exact.getRttMeanMicros(), thinned.getRttMeanMicros(), 100.0, "mean");
+        assertEquals(exact.getEwmaSlowMicros(), thinned.getEwmaSlowMicros(), 150.0, "slow EWMA");
+        double cv = Math.sqrt(thinned.getRttVarMicros()) / thinned.getRttMeanMicros();
+        assertEquals(1.0, cv, 0.2, "coefficient of variation");
+    }
+
+    private static MethodStats runExponential(long thinningNanos) {
+        long saved = MethodStats.minSmoothingIntervalNanos;
+        MethodStats.minSmoothingIntervalNanos = thinningNanos;
+        try {
+            java.util.Random rnd = new java.util.Random(42);
+            MethodStats ms = new MethodStats(1_000L, 0L);
+            long t = 1_000_000_000L;
+            for (int i = 0; i < 600_000; i++) { // 12 s of traffic
+                t += 20_000L;
+                long rtt = (long) (-Math.log(1 - rnd.nextDouble()) * 1_000_000L);
+                ms.update(t, Math.max(1L, rtt), PeakEwmaConfig.DEFAULTS);
+            }
+            return ms;
+        } finally {
+            MethodStats.minSmoothingIntervalNanos = saved;
+        }
+    }
+
+    /** #100: a completion that ended earlier but wins its CAS later must not rewind time. */
+    @Test
+    void outOfOrderCompletion_doesNotMoveTimestampsBackwards() {
+        PeakEwmaConfig cfg = PeakEwmaConfig.DEFAULTS;
+        MethodStats ms = new MethodStats(10_000L, 0L);
+        long t = 1_000_000_000L;
+        ms.update(t, 5_000_000L, cfg);
+        ms.update(t + 100_000_000L, 50_000_000L, cfg); // spike at t+100 ms
+        ms.update(t + 90_000_000L, 1_000_000L, cfg); // ended at t+90 ms, applied later
+        ms.update(t + 95_000_000L, 1_000_000L, cfg, true); // a failure, also out of order
+        assertEquals(t + 100_000_000L, ms.getLastUpdateNanos());
+
+        // The peak is decayed from t+100 ms, not from the earlier end times.
+        long tau = PeakEwmaTuner.tauFastMillis(ms, cfg);
+        double expected =
+                ms.getEwmaFastMicros()
+                        * EwmaClocks.decayFactor(t + 110_000_000L, t + 100_000_000L, tau);
+        assertEquals(expected, ms.decayedPeakMicros(t + 110_000_000L), 1e-9);
     }
 
     @Test

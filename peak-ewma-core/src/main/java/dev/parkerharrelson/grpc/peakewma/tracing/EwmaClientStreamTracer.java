@@ -2,6 +2,7 @@ package dev.parkerharrelson.grpc.peakewma.tracing;
 
 import dev.parkerharrelson.grpc.peakewma.EwmaClocks;
 import dev.parkerharrelson.grpc.peakewma.MethodStats;
+import dev.parkerharrelson.grpc.peakewma.MethodTable;
 import dev.parkerharrelson.grpc.peakewma.PeakEwmaConfig;
 import dev.parkerharrelson.grpc.peakewma.metrics.LbMetrics;
 import dev.parkerharrelson.grpc.peakewma.metrics.NoopLbMetrics;
@@ -27,6 +28,11 @@ import org.slf4j.LoggerFactory;
 final class EwmaClientStreamTracer extends ClientStreamTracer {
     private static final Logger logger = LoggerFactory.getLogger(EwmaClientStreamTracer.class);
 
+    // Either the table (production: stats and window are resolved when the call ends) or fixed
+    // stats/window (tests). Resolving at the end matters for long-lived streams: the table prunes
+    // methods with no recent samples, and a stream opened before the prune would otherwise report
+    // its failure into a detached window the outlier tick never reads.
+    private final MethodTable table;
     private final MethodStats stats;
     private final PeakEwmaConfig cfg;
     private final EwmaClocks clocks;
@@ -66,7 +72,37 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             LbMetrics metrics,
             String method,
             boolean recordLatency) {
+        this(null, stats, cfg, clocks, onInc, onDec, window, metrics, method, recordLatency);
+    }
+
+    /** Production constructor: stats and window are looked up in {@code table} at close time. */
+    @SuppressWarnings("java:S107")
+    EwmaClientStreamTracer(
+            MethodTable table,
+            PeakEwmaConfig cfg,
+            EwmaClocks clocks,
+            Runnable onInc,
+            Runnable onDec,
+            LbMetrics metrics,
+            String method,
+            boolean recordLatency) {
+        this(table, null, cfg, clocks, onInc, onDec, null, metrics, method, recordLatency);
+    }
+
+    @SuppressWarnings("java:S107")
+    private EwmaClientStreamTracer(
+            MethodTable table,
+            MethodStats stats,
+            PeakEwmaConfig cfg,
+            EwmaClocks clocks,
+            Runnable onInc,
+            Runnable onDec,
+            ErrorWindow window,
+            LbMetrics metrics,
+            String method,
+            boolean recordLatency) {
         this.recordLatency = recordLatency;
+        this.table = table;
         this.stats = stats;
         this.cfg = cfg;
         this.clocks = clocks;
@@ -109,7 +145,11 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
 
             boolean serverFailure = isServerFailure(status);
             if (serverFailure || (recordLatency && rtt > 0L)) {
-                stats.update(end, rtt, cfg, serverFailure);
+                // A streaming call's duration is its lifetime, not a latency: it must not set
+                // the size of the failure penalty (an hour-long stream reset by GOAWAY would
+                // write the 10 s cap into the peak). Pass 0 so only the penalty applies.
+                MethodStats s = table != null ? table.statsFor(method) : stats;
+                s.update(end, recordLatency ? rtt : 0L, cfg, serverFailure);
             }
             if (recordLatency && rtt > 0L) {
                 metrics.recordObservedRtt(method, rtt);
@@ -117,7 +157,8 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             // Outlier detection counts backend-health failures only: application outcomes
             // (NOT_FOUND, INVALID_ARGUMENT, ...) and client cancellations come from a healthy
             // server. DEADLINE_EXCEEDED counts: a backend timing out every call is unhealthy.
-            window.recordResult(
+            ErrorWindow w = table != null ? table.windowFor(method) : window;
+            w.recordResult(
                     !(serverFailure || status.getCode() == Status.Code.DEADLINE_EXCEEDED), end);
         } catch (Exception e) {
             logger.error("EWMA stream tracer update failed on streamClosed", e);

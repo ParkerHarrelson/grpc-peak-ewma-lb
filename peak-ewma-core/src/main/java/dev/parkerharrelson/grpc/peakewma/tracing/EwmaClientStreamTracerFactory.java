@@ -80,9 +80,7 @@ public final class EwmaClientStreamTracerFactory extends ClientStreamTracer.Fact
     @Override
     public ClientStreamTracer newClientStreamTracer(
             ClientStreamTracer.StreamInfo info, Metadata headers) {
-        var stats = table.statsFor(method);
-        var window = table.windowFor(method);
         return new EwmaClientStreamTracer(
-                stats, cfg, clocks, onInc, onDec, window, metrics, method, recordLatency);
+                table, cfg, clocks, onInc, onDec, metrics, method, recordLatency);
     }
 }
