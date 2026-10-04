@@ -1,6 +1,8 @@
 package dev.parkerharrelson.grpc.peakewma;
 
+import dev.parkerharrelson.grpc.peakewma.metrics.LbMetrics;
 import dev.parkerharrelson.grpc.peakewma.outlier.ErrorWindow;
+import dev.parkerharrelson.grpc.peakewma.tracing.EwmaClientStreamTracerFactory;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Set;
@@ -108,6 +110,42 @@ public final class MethodTable {
         methodWindows.values().forEach(ErrorWindow::reset);
     }
 
+    private record CachedFactory(
+            PeakEwmaConfig cfg, LbMetrics metrics, EwmaClientStreamTracerFactory factory) {}
+
+    private final ConcurrentHashMap<String, CachedFactory> unaryFactories =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedFactory> streamingFactories =
+            new ConcurrentHashMap<>();
+
+    /** The (immutable) tracer factory for calls of {@code method} on this backend, cached. */
+    EwmaClientStreamTracerFactory tracerFactory(
+            String method,
+            boolean recordLatency,
+            PeakEwmaConfig cfg,
+            EwmaClocks clocks,
+            LbMetrics metrics) {
+        var cache = recordLatency ? unaryFactories : streamingFactories;
+        CachedFactory c = cache.get(method);
+        if (c == null || c.cfg != cfg || c.metrics != metrics) {
+            c =
+                    new CachedFactory(
+                            cfg,
+                            metrics,
+                            new EwmaClientStreamTracerFactory(
+                                    this,
+                                    cfg,
+                                    clocks,
+                                    method,
+                                    this::incrementInflight,
+                                    this::decrementInflight,
+                                    metrics,
+                                    recordLatency));
+            cache.put(method, c);
+        }
+        return c.factory;
+    }
+
     /** Ejection backoff for {@code method} on this backend (outlier tick only). */
     EjectionBackoff backoffFor(String method) {
         return methodBackoff.computeIfAbsent(method, k -> new EjectionBackoff());
@@ -171,6 +209,8 @@ public final class MethodTable {
                 methodWindows.remove(key);
                 methodEjectedUntilNanos.remove(key);
                 methodBackoff.remove(key);
+                unaryFactories.remove(key);
+                streamingFactories.remove(key);
             }
         }
 
@@ -185,6 +225,8 @@ public final class MethodTable {
                 methodWindows.remove(key);
                 methodEjectedUntilNanos.remove(key);
                 methodBackoff.remove(key);
+                unaryFactories.remove(key);
+                streamingFactories.remove(key);
             }
         }
 

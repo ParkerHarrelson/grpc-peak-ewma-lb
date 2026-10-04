@@ -614,7 +614,8 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 if (sc != null) {
                     String scId = subchannelIds.remove(sc);
                     tables.remove(sc);
-                    states.remove(sc);
+                    SubchannelState removedState = states.remove(sc);
+                    if (removedState != null) removedState.markRemoved();
                     subchannelConn.remove(sc);
                     lastReconnectRequestNanos.remove(sc);
                     try {
