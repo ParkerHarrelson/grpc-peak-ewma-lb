@@ -33,9 +33,10 @@ import org.junit.jupiter.api.Test;
 class ServiceConfigWiringTest {
 
     @Test
-    void defaultServiceConfig_withInflightWeight_isAppliedByBalancer() throws Exception {
-        // With one ready backend and nothing inflight, inflightWeightEff == configured base weight.
-        List<Double> inflightWeightEff = new CopyOnWriteArrayList<>();
+    void defaultServiceConfig_withOutlierErrorRate_isAppliedByBalancer() throws Exception {
+        // The outlier tick reports the configured error-rate threshold as a tuning gauge. (This
+        // used inflightWeight, which is now derived rather than configured.)
+        List<Double> errorRate = new CopyOnWriteArrayList<>();
         LbMetrics recording =
                 (LbMetrics)
                         Proxy.newProxyInstance(
@@ -43,8 +44,8 @@ class ServiceConfigWiringTest {
                                 new Class<?>[] {LbMetrics.class},
                                 (proxy, method, args) -> {
                                     if (method.getName().equals("setAdaptiveTuning")
-                                            && LBConstants.INFLIGHT_WEIGHT_EFF.equals(args[0])) {
-                                        inflightWeightEff.add((Double) args[1]);
+                                            && LBConstants.OUTLIER_ERROR_RATE.equals(args[0])) {
+                                        errorRate.add((Double) args[1]);
                                     }
                                     return method.invoke(NoopLbMetrics.INSTANCE, args);
                                 });
@@ -65,7 +66,11 @@ class ServiceConfigWiringTest {
                             List.of(
                                     Map.of(
                                             PeakEwmaConfigKeys.POLICY_NAME,
-                                            Map.of(PeakEwmaConfigKeys.INFLIGHT_WEIGHT, 0.25))));
+                                            Map.of(
+                                                    PeakEwmaConfigKeys.OUTLIER_ERROR_RATE,
+                                                    0.5,
+                                                    PeakEwmaConfigKeys.OUTLIER_TICK_INTERVAL_MILLIS,
+                                                    200.0))));
 
             channel =
                     NettyChannelBuilder.forTarget(
@@ -83,8 +88,12 @@ class ServiceConfigWiringTest {
                     CallOptions.DEFAULT.withDeadlineAfter(5, TimeUnit.SECONDS),
                     new byte[0]);
 
-            assertThat(inflightWeightEff).isNotEmpty();
-            assertThat(inflightWeightEff.get(inflightWeightEff.size() - 1)).isEqualTo(0.25);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (errorRate.isEmpty() && System.nanoTime() < deadline) {
+                Thread.sleep(50); // the 200 ms tick (also from the service config) reports it
+            }
+            assertThat(errorRate).isNotEmpty();
+            assertThat(errorRate.get(errorRate.size() - 1)).isEqualTo(0.5);
         } finally {
             if (channel != null) {
                 channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
