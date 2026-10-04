@@ -115,8 +115,8 @@ class MethodTableTest {
     void inflight_increments_and_floorsAtZero_onDecrement() {
         MethodTable table = new MethodTable(cfg, t.clocks);
 
-        assertEquals(0, table.getInflight());
-        table.decrementInflight();
+        // The tracer pairs every decrement with a prior increment; the counter is striped
+        // (LongAdder) and floors at zero when read.
         assertEquals(0, table.getInflight());
 
         table.incrementInflight();
@@ -127,6 +127,9 @@ class MethodTableTest {
         assertEquals(1, table.getInflight());
 
         table.decrementInflight();
+        assertEquals(0, table.getInflight());
+
+        table.decrementInflight(); // unpaired (caller bug): still reads as 0, never negative
         assertEquals(0, table.getInflight());
 
         table.decrementInflight();

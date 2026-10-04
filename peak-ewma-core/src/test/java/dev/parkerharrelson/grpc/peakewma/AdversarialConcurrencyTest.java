@@ -275,6 +275,8 @@ class AdversarialConcurrencyTest {
     @Test
     void methodStats_concurrentUpdates_loseNothing() throws Exception {
         MethodStats ms = new MethodStats(5_000, T0);
+        long thinning = MethodStats.minSmoothingIntervalNanos;
+        MethodStats.minSmoothingIntervalNanos = 0L; // test the CAS loop itself: no thinning
         AtomicLong clock = new AtomicLong(T0);
         int threads = 16, per = 100_000;
         Thread[] ts = new Thread[threads];
@@ -289,6 +291,7 @@ class AdversarialConcurrencyTest {
             ts[t].start();
         }
         for (Thread t : ts) t.join();
+        MethodStats.minSmoothingIntervalNanos = thinning;
         assertThat(ms.getSamples()).isEqualTo(threads * per);
         assertThat(Double.isFinite(ms.getEwmaFastMicros()) && Double.isFinite(ms.getRttVarMicros()))
                 .isTrue();

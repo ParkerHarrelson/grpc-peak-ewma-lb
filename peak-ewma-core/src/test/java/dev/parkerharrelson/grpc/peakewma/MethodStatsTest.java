@@ -114,6 +114,30 @@ class MethodStatsTest {
      * writes.
      */
     @Test
+    void redundantSamples_areSkipped_butPeakRaisingSamplesAreAlwaysApplied() {
+        PeakEwmaConfig cfg = PeakEwmaConfig.DEFAULTS;
+        MethodStats ms = new MethodStats(10_000L, 0L);
+        long t = 1_000_000_000L;
+        ms.update(t, 5_000_000L, cfg); // first sample: 5 ms
+        int samples = ms.getSamples();
+
+        // 100 us later, a faster call: doesn't raise the peak and the smoothed stats were just
+        // written -> skipped (exact for the peak: readers decay the stored value to now).
+        ms.update(t + 100_000L, 4_000_000L, cfg);
+        assertEquals(samples, ms.getSamples());
+        assertEquals(t, ms.getLastUpdateNanos());
+
+        // 100 us later again, a SLOWER call: raises the peak -> always applied.
+        ms.update(t + 200_000L, 9_000_000L, cfg);
+        assertEquals(9_000.0, ms.getEwmaFastMicros(), 1e-6);
+        assertEquals(samples + 1, ms.getSamples());
+
+        // >= 1 ms after the last write, a fast call is applied to feed the smoothed stats.
+        ms.update(t + 200_000L + MethodStats.minSmoothingIntervalNanos, 4_000_000L, cfg);
+        assertEquals(samples + 2, ms.getSamples());
+    }
+
+    @Test
     void update_underHighConcurrency_doesNotLoseSamples() throws Exception {
         final int threads = 8;
         final int samplesPerThread = 10_000;
@@ -121,6 +145,9 @@ class MethodStatsTest {
 
         MethodStats ms = new MethodStats(10_000L, 0L);
         PeakEwmaConfig cfg = PeakEwmaConfig.DEFAULTS;
+        // This test checks the CAS loop never loses a write; disable write thinning.
+        long thinning = MethodStats.minSmoothingIntervalNanos;
+        MethodStats.minSmoothingIntervalNanos = 0L;
 
         ExecutorService exec = Executors.newFixedThreadPool(threads);
         CountDownLatch ready = new CountDownLatch(threads);
@@ -154,6 +181,7 @@ class MethodStatsTest {
                     done.await(30, TimeUnit.SECONDS),
                     "concurrent updates did not complete within timeout");
         } finally {
+            MethodStats.minSmoothingIntervalNanos = thinning;
             exec.shutdownNow();
         }
 

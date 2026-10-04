@@ -31,7 +31,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nonnull;
 import org.junit.jupiter.api.Test;
 
@@ -400,44 +399,24 @@ class PeakEwmaP2CBalancerOutlierTickEjectTest {
     }
 
     private static void setAtomicLongFieldValue(Object target, long value) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("firstSampleNanos");
-        f.setAccessible(true);
-        Object obj = f.get(target);
-        AtomicLong al;
-        if (obj == null) {
-            al = new AtomicLong();
-            f.set(target, al);
-        } else {
-            al = (AtomicLong) obj;
-        }
-        al.set(value);
+        ((MethodStats) target).overrideForTest(null, null, null, value, null);
     }
 
     private static void setAtomicIntFieldValue(Object target) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("samples");
-        f.setAccessible(true);
-        Object obj = f.get(target);
-        AtomicInteger ai;
-        if (obj == null) {
-            ai = new AtomicInteger();
-            f.set(target, ai);
-        } else {
-            ai = (AtomicInteger) obj;
-        }
-        ai.set(5000);
+        ((MethodStats) target).overrideForTest(null, null, 100, null, null);
     }
 
     private static void setVolatileLongField(Object target, long value) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("lastUpdateNanos");
-        f.setAccessible(true);
-        f.setLong(target, value);
+        ((MethodStats) target).overrideForTest(null, null, null, null, value);
     }
 
     private static void setVolatileDoubleField(Object target, String fieldName, double value)
             throws Exception {
-        Field f = MethodStats.class.getDeclaredField(fieldName);
-        f.setAccessible(true);
-        f.setDouble(target, value);
+        MethodStats ms = (MethodStats) target;
+        if (fieldName.equals("ewmaFastMicros")) ms.overrideForTest(value, null, null, null, null);
+        else if (fieldName.equals("ewmaSlowMicros"))
+            ms.overrideForTest(null, value, null, null, null);
+        else throw new IllegalArgumentException(fieldName);
     }
 
     @SuppressWarnings("unchecked")

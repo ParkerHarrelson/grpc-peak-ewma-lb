@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
 import dev.parkerharrelson.grpc.peakewma.outlier.ErrorWindow;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /** Numerical / formula bugs in the EWMA, tuner and error window. */
@@ -96,7 +95,7 @@ class AdversarialMathTest {
         }
         now.set(t + 5_000 * MS);
 
-        ((AtomicInteger) AdversarialFixture.getField(ms, "samples")).set(Integer.MAX_VALUE);
+        ms.overrideForTest(null, null, Integer.MAX_VALUE, null, null);
         ms.update(now.get(), 5 * MS, CFG);
         assertThat(ms.getSamples()).as("sample counter after 2^31 calls").isPositive();
     }

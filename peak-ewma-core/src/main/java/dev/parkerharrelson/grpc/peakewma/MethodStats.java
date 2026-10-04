@@ -1,8 +1,6 @@
 package dev.parkerharrelson.grpc.peakewma;
 
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Per-(subchannel, method) latency statistics used by the Peak-EWMA picker.
@@ -13,37 +11,39 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li><b>fast</b> — Peak EWMA: {@code max(rtt, previous * decay)}. Reacts instantly to spikes so
  *       a slow response is penalised on the very next pick.
  *   <li><b>slow</b> — Standard EWMA: {@code rtt * (1 - decay) + previous * decay}. Smooths short
- *       bursts so the seed for new methods and the cold-start fallback don't flip on every tick.
+ *       bursts; the outlier detector's baseline.
  * </ul>
  *
  * Both decay half-lives (configurable via {@link PeakEwmaConfig#tauFastMillis} and {@link
- * PeakEwmaConfig#tauSlowMillis}) are further adapted by {@link PeakEwmaTuner} based on observed
+ * PeakEwmaConfig#tauSlowMillis}) are further adapted by {@link PeakEwmaTuner} based on the observed
  * coefficient of variation, so noisy methods don't lock onto a stale peak.
  *
- * <p>A Welford running variance of RTTs is maintained so {@code PeakEwmaTuner.coeffVarFromEwma} can
- * return a normalized noise level. Updates are serialized through a single lock to prevent lost
- * writes under concurrent samples; reads are lock-free volatile.
+ * <p>Mean and variance are exponentially weighted with the slow half-life (bias-corrected, so the
+ * first samples count fully), so the coefficient of variation reflects recent behaviour rather than
+ * everything since the stats were created.
+ *
+ * <p><b>Concurrency.</b> All state lives in one immutable {@link State} swapped with
+ * compare-and-set: every completed RPC updates the stats of the (backend, method) it ran on, so
+ * under load many threads hit the same object. A lock here parked threads for microseconds per RPC;
+ * a CAS loser simply recomputes and retries, and readers always see a consistent snapshot.
  */
 public final class MethodStats {
-
-    private volatile long lastUpdateNanos;
-    private volatile double ewmaFastMicros;
-    private volatile double ewmaSlowMicros;
-
-    private final AtomicLong meanBits = new AtomicLong(Double.doubleToRawLongBits(0.0));
-    private double m2Micros = 0.0;
-    private long varN = 0;
-    // Guarded by varLock: true until the first sample (success or failure) lands.
-    private boolean fastIsSeed = true;
 
     /** Upper bound for the failure penalty recorded into the fast EWMA (10 s). */
     static final double MAX_PENALTY_MICROS = 10_000_000.0;
 
-    private final ReentrantLock varLock = new ReentrantLock();
-    private volatile double varMicros = 0.0;
+    /** One consistent snapshot of the statistics. */
+    record State(
+            double fastMicros,
+            double slowMicros,
+            long lastUpdateNanos,
+            long firstSampleNanos,
+            int samples,
+            double meanMicros,
+            double varMicros,
+            boolean fastIsSeed) {}
 
-    private final AtomicLong firstSampleNanos = new AtomicLong(0L);
-    private final AtomicInteger samples = new AtomicInteger(0);
+    private final AtomicReference<State> state;
 
     /**
      * Creates a new {@code MethodStats} seeded from the initial RTT and timestamp.
@@ -52,14 +52,23 @@ public final class MethodStats {
      * @param initNanos seed timestamp, normally {@code clocks.nanoTime()}
      */
     public MethodStats(long initialRttMicros, long initNanos) {
-        this.ewmaFastMicros = initialRttMicros;
-        this.ewmaSlowMicros = initialRttMicros;
-        this.lastUpdateNanos = initNanos;
+        this.state =
+                new AtomicReference<>(
+                        new State(
+                                initialRttMicros,
+                                initialRttMicros,
+                                initNanos,
+                                0L,
+                                0,
+                                0.0,
+                                0.0,
+                                true));
     }
 
     /**
-     * Records one observed RTT and advances both EWMAs + variance. Thread-safe against concurrent
-     * callers; the full write is serialized so no sample is lost.
+     * Records one observed RTT and advances both EWMAs + variance. Thread-safe. A sample that
+     * neither raises the peak nor is due for the smoothed statistics is skipped (see {@link
+     * #redundant}).
      *
      * @param nowNanos end-of-call timestamp from the shared clock
      * @param rttNanos observed RTT in nanoseconds; must be non-negative
@@ -86,125 +95,177 @@ public final class MethodStats {
      */
     public void update(long nowNanos, long rttNanos, PeakEwmaConfig cfg, boolean serverFailure) {
         double rttMicros = EwmaClocks.nanosToMicros(rttNanos);
-
-        // Serialize the full EWMA + variance update so concurrent samples cannot lose each
-        // other's writes. Readers stay lock-free via volatile fields — they may observe
-        // slightly inconsistent fast/slow pairs between updates, which the picker tolerates,
-        // but a single update is applied atomically relative to other updates.
-        varLock.lock();
-        try {
-            if (serverFailure) {
-                long tauFastEff = PeakEwmaTuner.tauFastMillis(this, cfg);
-                double decayFast = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauFastEff);
-                double penalty =
-                        Math.min(
-                                MAX_PENALTY_MICROS,
-                                Math.max(
-                                        rttMicros,
-                                        2.0
-                                                * Math.max(
-                                                        ewmaFastMicros * decayFast,
-                                                        ewmaSlowMicros)));
-                ewmaFastMicros = Math.max(penalty, ewmaFastMicros * decayFast);
-                fastIsSeed = false;
-                lastUpdateNanos = nowNanos;
+        while (true) {
+            State s = state.get();
+            if (!serverFailure && redundant(s, nowNanos, rttMicros, cfg)) {
                 return;
             }
-
-            long tauFastEff = PeakEwmaTuner.tauFastMillis(this, cfg);
-            long tauSlowEff = PeakEwmaTuner.tauSlowMillis(this, cfg);
-            double decayFast = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauFastEff);
-            double decaySlow = EwmaClocks.decayFactor(nowNanos, lastUpdateNanos, tauSlowEff);
-
-            // The first real sample replaces the seed outright. Blending it with the seed using
-            // the 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
-            ewmaFastMicros =
-                    fastIsSeed ? rttMicros : Math.max(rttMicros, ewmaFastMicros * decayFast);
-            ewmaSlowMicros =
-                    (varN == 0)
-                            ? rttMicros
-                            : rttMicros * (1 - decaySlow) + ewmaSlowMicros * decaySlow;
-            fastIsSeed = false;
-            lastUpdateNanos = nowNanos;
-
-            long n = ++varN;
-            double curMean = Double.longBitsToDouble(meanBits.get());
-            double newMean;
-            double newM2;
-
-            if (n == 1) {
-                newMean = rttMicros;
-                newM2 = 0.0;
-            } else {
-                double delta = rttMicros - curMean;
-                newMean = curMean + delta / n;
-                newM2 = m2Micros + delta * (rttMicros - newMean);
+            State next =
+                    serverFailure
+                            ? afterFailure(s, nowNanos, rttMicros, cfg)
+                            : afterSample(s, nowNanos, rttMicros, cfg);
+            if (state.compareAndSet(s, next)) {
+                return;
             }
-            m2Micros = newM2;
-            meanBits.set(Double.doubleToRawLongBits(newMean));
-
-            varMicros = (n > 1) ? Math.max(0.0, newM2 / (n - 1)) : 0.0;
-
-            // Saturating: only "at least minSamples" matters, and an int that wraps after 2^31
-            // calls would flip a busy peer back to "cold".
-            int s = samples.get();
-            if (s == 0) {
-                firstSampleNanos.compareAndSet(0L, nowNanos);
-            }
-            if (s < Integer.MAX_VALUE) {
-                samples.set(s + 1);
-            }
-        } finally {
-            varLock.unlock();
         }
+    }
+
+    /**
+     * Minimum spacing between writes that only feed the smoothed statistics. At most one such write
+     * per (backend, method) per millisecond still gives the 30 s slow horizon tens of thousands of
+     * samples, and removes nearly all write contention at high request rates.
+     */
+    static volatile long minSmoothingIntervalNanos = 1_000_000L;
+
+    /**
+     * A sample needs no write when it doesn't raise the peak and the smoothed statistics were
+     * updated within {@link #minSmoothingIntervalNanos}. Skipping it is exact for the fast EWMA:
+     * readers decay the stored peak to now, which is what {@code max(rtt, decayed)} would store.
+     */
+    private static boolean redundant(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+        long interval = minSmoothingIntervalNanos;
+        if (interval <= 0 || s.fastIsSeed || s.samples == 0) return false;
+        // Out-of-order completions (now < lastUpdate) count as "within the interval".
+        if (now - s.lastUpdateNanos >= interval) return false;
+        double decayed =
+                s.fastMicros
+                        * EwmaClocks.decayFactor(
+                                now,
+                                s.lastUpdateNanos,
+                                PeakEwmaTuner.tauFastMillis(coeffVar(s), cfg));
+        return rttMicros <= decayed;
+    }
+
+    private static State afterFailure(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+        double decayFast =
+                EwmaClocks.decayFactor(
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(coeffVar(s), cfg));
+        double decayed = s.fastMicros * decayFast;
+        double penalty =
+                Math.min(
+                        MAX_PENALTY_MICROS,
+                        Math.max(rttMicros, 2.0 * Math.max(decayed, s.slowMicros)));
+        return new State(
+                Math.max(penalty, decayed),
+                s.slowMicros,
+                now,
+                s.firstSampleNanos,
+                s.samples,
+                s.meanMicros,
+                s.varMicros,
+                false);
+    }
+
+    private static State afterSample(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+        double cv = coeffVar(s);
+        double decayFast =
+                EwmaClocks.decayFactor(
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(cv, cfg));
+        double decaySlow =
+                EwmaClocks.decayFactor(
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauSlowMillis(cv, cfg));
+
+        // The first real sample replaces the seed outright. Blending it with the seed using the
+        // 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
+        double fast = s.fastIsSeed ? rttMicros : Math.max(rttMicros, s.fastMicros * decayFast);
+        double slow =
+                s.samples == 0 ? rttMicros : rttMicros * (1 - decaySlow) + s.slowMicros * decaySlow;
+
+        // Exponentially weighted mean/variance on the slow horizon, bias-corrected: the weight of
+        // a new sample is at least 1/(n+1), so the first samples behave like a plain average.
+        double weight = Math.max(1 - decaySlow, 1.0 / (Math.min(s.samples, 1 << 20) + 1));
+        double diff = rttMicros - s.meanMicros;
+        double mean = s.meanMicros + weight * diff;
+        double var = (1 - weight) * (s.varMicros + weight * diff * diff);
+
+        return new State(
+                fast,
+                slow,
+                now,
+                s.firstSampleNanos == 0L ? now : s.firstSampleNanos,
+                // Saturating: only "at least minSamples" matters, and an int that wraps after
+                // 2^31 calls would flip a busy peer back to "cold".
+                s.samples == Integer.MAX_VALUE ? Integer.MAX_VALUE : s.samples + 1,
+                mean,
+                Math.max(0.0, var),
+                false);
+    }
+
+    private static double coeffVar(State s) {
+        return Math.sqrt(Math.max(0.0, s.varMicros)) / Math.max(1e-6, s.meanMicros);
+    }
+
+    /** One consistent snapshot of all statistics. */
+    State snapshot() {
+        return state.get();
     }
 
     /**
      * @return current fast (peak) EWMA in microseconds
      */
     public double getEwmaFastMicros() {
-        return ewmaFastMicros;
+        return state.get().fastMicros;
     }
 
     /**
      * @return current slow EWMA in microseconds
      */
     public double getEwmaSlowMicros() {
-        return ewmaSlowMicros;
+        return state.get().slowMicros;
     }
 
     /**
-     * @return total number of samples recorded since construction
+     * @return number of successful samples recorded (saturates at {@link Integer#MAX_VALUE})
      */
     public int getSamples() {
-        return samples.get();
+        return state.get().samples;
     }
 
     /**
      * @return nano-time of the first-ever sample on this entry, or 0 if none have been recorded
      */
     public long getFirstSampleNanos() {
-        return firstSampleNanos.get();
+        return state.get().firstSampleNanos;
     }
 
     /**
      * @return nano-time of the most recent sample; matches the construction timestamp if none
      */
     public long getLastUpdateNanos() {
-        return lastUpdateNanos;
+        return state.get().lastUpdateNanos;
     }
 
     /**
-     * @return Welford running mean of observed RTTs in microseconds
+     * @return exponentially weighted mean of observed RTTs in microseconds
      */
     public double getRttMeanMicros() {
-        return Double.longBitsToDouble(meanBits.get());
+        return state.get().meanMicros;
     }
 
     /**
-     * @return Welford sample variance of observed RTTs in microseconds squared
+     * @return exponentially weighted variance of observed RTTs in microseconds squared
      */
     public double getRttVarMicros() {
-        return varMicros;
+        return state.get().varMicros;
+    }
+
+    /** Test seam: overwrite selected fields (null = keep). Package-private, tests only. */
+    void overrideForTest(
+            Double fastMicros,
+            Double slowMicros,
+            Integer samples,
+            Long firstSampleNanos,
+            Long lastUpdateNanos) {
+        State s = state.get();
+        state.set(
+                new State(
+                        fastMicros != null ? fastMicros : s.fastMicros,
+                        slowMicros != null ? slowMicros : s.slowMicros,
+                        lastUpdateNanos != null ? lastUpdateNanos : s.lastUpdateNanos,
+                        firstSampleNanos != null ? firstSampleNanos : s.firstSampleNanos,
+                        samples != null ? samples : s.samples,
+                        s.meanMicros,
+                        s.varMicros,
+                        s.fastIsSeed && fastMicros == null));
     }
 }

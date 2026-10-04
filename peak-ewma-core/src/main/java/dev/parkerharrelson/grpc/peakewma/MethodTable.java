@@ -26,6 +26,9 @@ public final class MethodTable {
     private final ConcurrentHashMap<String, ErrorWindow> methodWindows = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> methodEjectedUntilNanos =
             new ConcurrentHashMap<>();
+    // A single atomic: every pick READS it for two peers, so it must be one cache line (a
+    // striped LongAdder made each read touch every cell). Writes are one getAndAdd each, no CAS
+    // retry loop; the value is floored at zero when read.
     private final AtomicInteger inflight = new AtomicInteger();
 
     private final PeakEwmaConfig peakEwmaConfig;
@@ -95,12 +98,12 @@ public final class MethodTable {
 
     /** Increments the subchannel's inflight counter. Called when a stream is created. */
     public void incrementInflight() {
-        inflight.incrementAndGet();
+        inflight.getAndIncrement();
     }
 
     /** Decrements the subchannel's inflight counter, clamped at zero to guard against underflow. */
     public void decrementInflight() {
-        inflight.updateAndGet(val -> Math.max(0, val - 1));
+        inflight.getAndDecrement(); // paired with incrementInflight by the tracer
     }
 
     /**
