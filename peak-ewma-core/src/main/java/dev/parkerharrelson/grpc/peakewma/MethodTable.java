@@ -97,6 +97,22 @@ public final class MethodTable {
                 method, k -> new ErrorWindow(INITIAL_ERROR_WINDOW_MILLIS));
     }
 
+    private final ConcurrentHashMap<String, EjectionBackoff> methodBackoff =
+            new ConcurrentHashMap<>();
+
+    /**
+     * Clears every method's error window. Called when the backend is ejected for errors, so that
+     * after it returns it is judged only on fresh evidence, never re-ejected for the same errors.
+     */
+    void resetErrorWindows() {
+        methodWindows.values().forEach(ErrorWindow::reset);
+    }
+
+    /** Ejection backoff for {@code method} on this backend (outlier tick only). */
+    EjectionBackoff backoffFor(String method) {
+        return methodBackoff.computeIfAbsent(method, k -> new EjectionBackoff());
+    }
+
     /** Marks {@code method} as ejected until the given nano-timestamp. */
     public void ejectMethodUntil(String method, long untilNanos) {
         methodEjectedUntilNanos.put(method, untilNanos);
@@ -154,6 +170,7 @@ public final class MethodTable {
                 it.remove();
                 methodWindows.remove(key);
                 methodEjectedUntilNanos.remove(key);
+                methodBackoff.remove(key);
             }
         }
 
@@ -167,6 +184,7 @@ public final class MethodTable {
                 methods.remove(key);
                 methodWindows.remove(key);
                 methodEjectedUntilNanos.remove(key);
+                methodBackoff.remove(key);
             }
         }
 

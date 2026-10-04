@@ -141,10 +141,10 @@ class PeakEwmaTunerTest {
         assertTrue(minFrac >= 0.4 && minFrac <= 0.7);
         assertTrue(maxFrac >= 0.4 && maxFrac <= 0.7);
 
-        int minTotalSmall = PeakEwmaTuner.minTotalForErrorEjectEff(1);
-        int minTotalLarge = PeakEwmaTuner.minTotalForErrorEjectEff(10_000);
-        assertTrue(minTotalSmall >= 20 && minTotalSmall <= 100);
-        assertTrue(minTotalLarge >= 20 && minTotalLarge <= 100);
+        // Error ejection is statistical: conclusive with few calls, not with noisy many.
+        assertTrue(PeakEwmaTuner.errorRateLowerBound(10, 10) > 0.7);
+        assertTrue(PeakEwmaTuner.errorRateLowerBound(3, 20) < 0.1);
+        assertTrue(PeakEwmaTuner.errorRateLowerBound(60, 100) > 0.45);
 
         double low = PeakEwmaTuner.latencyMultiplierEff(0.10, c);
         double mid = PeakEwmaTuner.latencyMultiplierEff(0.30, c);

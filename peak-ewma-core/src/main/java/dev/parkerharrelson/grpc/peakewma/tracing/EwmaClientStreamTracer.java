@@ -114,7 +114,11 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             if (recordLatency && rtt > 0L) {
                 metrics.recordObservedRtt(method, rtt);
             }
-            window.recordResult(status.isOk(), end);
+            // Outlier detection counts backend-health failures only: application outcomes
+            // (NOT_FOUND, INVALID_ARGUMENT, ...) and client cancellations come from a healthy
+            // server. DEADLINE_EXCEEDED counts: a backend timing out every call is unhealthy.
+            window.recordResult(
+                    !(serverFailure || status.getCode() == Status.Code.DEADLINE_EXCEEDED), end);
         } catch (Exception e) {
             logger.error("EWMA stream tracer update failed on streamClosed", e);
         } finally {

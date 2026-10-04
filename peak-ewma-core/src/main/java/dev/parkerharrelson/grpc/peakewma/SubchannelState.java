@@ -19,6 +19,12 @@ public final class SubchannelState {
     private volatile long readySinceNanos = 0L;
     private volatile long ejectedUntilNanos = 0L;
     private final AtomicLong lastEjectEndNanos = new AtomicLong(0L);
+    private final EjectionBackoff backoff = new EjectionBackoff();
+
+    /** Ejection backoff for this backend (outlier tick only). */
+    EjectionBackoff backoff() {
+        return backoff;
+    }
 
     /** Stamps the moment this subchannel last transitioned to READY. */
     public void markReady(long nowNanos) {
