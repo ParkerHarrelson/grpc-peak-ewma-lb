@@ -37,7 +37,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -696,62 +695,24 @@ class PeakEwmaP2CBalancerTest {
     }
 
     private static void setVolatileLongField(Object target, long value) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("lastUpdateNanos");
-        f.setAccessible(true);
-        if (f.getType() != long.class) {
-            throw new IllegalStateException(
-                    "lastUpdateNanos" + " is not long (it's " + f.getType() + ")");
-        }
-        f.setLong(target, value);
+        ((MethodStats) target).overrideForTest(null, null, null, null, value);
     }
 
     private static void setVolatileDoubleField(Object target, String fieldName, double value)
             throws Exception {
-        Field f = MethodStats.class.getDeclaredField(fieldName);
-        f.setAccessible(true);
-        if (f.getType() != double.class) {
-            throw new IllegalStateException(
-                    fieldName + " is not double (it's " + f.getType() + ")");
-        }
-        f.setDouble(target, value);
+        MethodStats ms = (MethodStats) target;
+        if (fieldName.equals("ewmaFastMicros")) ms.overrideForTest(value, null, null, null, null);
+        else if (fieldName.equals("ewmaSlowMicros"))
+            ms.overrideForTest(null, value, null, null, null);
+        else throw new IllegalArgumentException(fieldName);
     }
 
     private static void setAtomicLongFieldValue(Object target, long value) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("firstSampleNanos");
-        f.setAccessible(true);
-
-        Object obj = f.get(target);
-        AtomicLong al;
-        if (obj == null) {
-            al = new AtomicLong();
-            f.set(target, al);
-        } else if (obj instanceof AtomicLong) {
-            al = (AtomicLong) obj;
-        } else {
-            throw new IllegalStateException(
-                    "firstSampleNanos" + " is not AtomicLong (it's " + obj.getClass() + ")");
-        }
-
-        al.set(value);
+        ((MethodStats) target).overrideForTest(null, null, null, value, null);
     }
 
     private static void setAtomicIntFieldValue(Object target) throws Exception {
-        Field f = MethodStats.class.getDeclaredField("samples");
-        f.setAccessible(true);
-
-        Object obj = f.get(target);
-        AtomicInteger ai;
-        if (obj == null) {
-            ai = new AtomicInteger();
-            f.set(target, ai);
-        } else if (obj instanceof AtomicInteger) {
-            ai = (AtomicInteger) obj;
-        } else {
-            throw new IllegalStateException(
-                    "samples" + " is not AtomicInteger (it's " + obj.getClass() + ")");
-        }
-
-        ai.set(50);
+        ((MethodStats) target).overrideForTest(null, null, 100, null, null);
     }
 
     @SuppressWarnings("unchecked")

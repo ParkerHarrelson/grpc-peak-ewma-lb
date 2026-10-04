@@ -36,7 +36,10 @@ final class PeakEwmaTuner {
     }
 
     static long tauFastMillis(MethodStats ms, PeakEwmaConfig cfg) {
-        double cv = coeffVarFromEwma(ms);
+        return tauFastMillis(coeffVarFromEwma(ms), cfg);
+    }
+
+    static long tauFastMillis(double cv, PeakEwmaConfig cfg) {
         // Adapt around the CONFIGURED half-life (clamps are relative to it); with the default
         // 1000 ms this is the same [300, 2000] ms range as before.
         double base = cfg.tauFastMillis;
@@ -47,7 +50,10 @@ final class PeakEwmaTuner {
     }
 
     static long tauSlowMillis(MethodStats ms, PeakEwmaConfig cfg) {
-        double cv = coeffVarFromEwma(ms);
+        return tauSlowMillis(coeffVarFromEwma(ms), cfg);
+    }
+
+    static long tauSlowMillis(double cv, PeakEwmaConfig cfg) {
         // Relative to the configured value; default 30 s gives the previous [15, 60] s range.
         double base = cfg.tauSlowMillis;
         double min = 0.5 * base;
