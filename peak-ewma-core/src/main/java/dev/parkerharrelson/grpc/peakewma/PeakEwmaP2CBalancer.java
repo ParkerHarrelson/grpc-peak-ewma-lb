@@ -270,14 +270,15 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 }
             }
 
-            final long until = now + EwmaClocks.millisToNanos(c.outlierEjectMillis);
+            final long baseEject = EwmaClocks.millisToNanos(c.outlierEjectMillis);
             final long cooldown = EwmaClocks.millisToNanos(c.outlierReentryCooldownMillis);
             final int maxEjected = PeakEwmaTuner.maxEjectedCountEff(n);
             final int minReady = PeakEwmaTuner.minReadyAfterEjectEff(n);
-            final int minTotal = PeakEwmaTuner.minTotalForErrorEjectEff(n);
             int ejectedSubchannels = 0;
             for (Subchannel sc : ready) {
-                if (states.get(sc).isEjected(now)) ejectedSubchannels++;
+                SubchannelState st0 = states.get(sc);
+                st0.backoff().maybeForgive(now, baseEject, st0.isEjected(now));
+                if (st0.isEjected(now)) ejectedSubchannels++;
             }
 
             for (Map.Entry<String, List<PeerMethod>> e : byMethod.entrySet()) {
@@ -328,16 +329,25 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                     SubchannelState st = states.get(pm.sc);
                     String scId = subchannelIds.getOrDefault(pm.sc, UNKNOWN);
 
+                    EjectionBackoff methodBackoff = pm.table.backoffFor(method);
+                    methodBackoff.maybeForgive(
+                            now, baseEject, pm.table.isMethodEjected(method, now));
+
+                    // Statistically conclusive, not volume-gated: eject when the 95% lower bound
+                    // on the error rate is above the threshold.
                     boolean highErr =
                             c.outlierErrorRate > 0.0
-                                    && pm.snap.total >= minTotal
-                                    && pm.snap.errorRate >= c.outlierErrorRate;
+                                    && pm.snap.total >= PeakEwmaTuner.MIN_ERROR_EVIDENCE
+                                    && PeakEwmaTuner.errorRateLowerBound(
+                                                    pm.snap.errors, pm.snap.total)
+                                            >= c.outlierErrorRate;
                     if (highErr
                             && !st.isEjected(now)
                             && now >= st.lastEjectEndNanos() + cooldown
                             && ejectedSubchannels < maxEjected
                             && n - (ejectedSubchannels + 1) >= minReady) {
-                        st.ejectUntil(until);
+                        st.ejectUntil(st.backoff().nextEjectionEnd(now, baseEject));
+                        pm.table.resetErrorWindows(); // judge it on fresh evidence when it returns
                         ejectedSubchannels++;
                         metrics.recordOutlierEjection(scId, ERRORS, pm.snap.errorRate, 1.0);
                         continue;
@@ -352,11 +362,15 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                                     PeakEwmaTuner.coeffVarFromEwma(pm.stats), c);
                     if (ratio >= multiplier
                             && !pm.table.isMethodEjected(method, now)
+                            // fresh evidence: a sample taken after the previous ejection ended
+                            && pm.stats.getLastUpdateNanos()
+                                    > pm.table.methodEjectedUntilNanos(method)
                             && now >= pm.table.methodEjectedUntilNanos(method) + cooldown
                             && methodEjected < maxEjected
                             && peers.size() - (methodEjected + 1)
                                     >= Math.min(minReady, peers.size() - 1)) {
-                        pm.table.ejectMethodUntil(method, until);
+                        pm.table.ejectMethodUntil(
+                                method, methodBackoff.nextEjectionEnd(now, baseEject));
                         methodEjected++;
                         metrics.recordOutlierEjection(scId, LATENCY, pm.snap.errorRate, ratio);
                         metrics.setAdaptiveTuning(LATENCY_MULTIPLIER_EFF, multiplier);

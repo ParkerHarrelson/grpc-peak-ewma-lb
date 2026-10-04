@@ -90,6 +90,26 @@ final class PeakEwmaTuner {
                 Math.rint(clamp(1000.0 * targetSamples / denominator, 2.0 * tickMillis, 300_000.0));
     }
 
+    /** Fewest calls in the window before an error rate is judged at all. */
+    static final int MIN_ERROR_EVIDENCE = 5;
+
+    /**
+     * 95% Wilson lower bound on the true error rate given {@code errors} of {@code total}. A
+     * backend is ejected when even this pessimistic-for-ejection estimate exceeds the threshold: 10
+     * failures of 10 calls is conclusive (bound 0.72), 3 of 20 is not (0.05). Replaces a fixed
+     * ~40-call volume gate that a backend drained to ~2% of traffic never reached.
+     */
+    static double errorRateLowerBound(long errors, long total) {
+        if (total <= 0) return 0.0;
+        double z = 1.96;
+        double n = total;
+        double p = errors / n;
+        double z2 = z * z;
+        double centre = p + z2 / (2 * n);
+        double margin = z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n));
+        return Math.max(0.0, (centre - margin) / (1 + z2 / n));
+    }
+
     static int maxEjectionPercentEff(int readyCount) {
         int v = (int) Math.round(10 + 5 * log2(Math.max(1.0, readyCount)));
         return clamp(v, 10, 50);
@@ -115,11 +135,6 @@ final class PeakEwmaTuner {
     static double minReadyFractionAfterEjectEff(int readyCount) {
         double v = 0.7 - 0.05 * log2(Math.max(1.0, readyCount));
         return clamp(v, 0.4, 0.7);
-    }
-
-    static int minTotalForErrorEjectEff(int readyCount) {
-        int v = (int) Math.round(30 + 5 * log2(Math.max(1.0, readyCount)));
-        return clamp(v, 20, 100);
     }
 
     static double latencyMultiplierEff(double coeffVar, PeakEwmaConfig cfg) {

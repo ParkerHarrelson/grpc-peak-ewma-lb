@@ -15,11 +15,11 @@ public final class PeakEwmaConfig {
     private static final boolean DEF_OUTLIER_ENABLED = true;
     private static final long DEF_OUTLIER_WINDOW_MS = 15_000;
     private static final double DEF_OUTLIER_ERROR_RATE = 0.20;
-    private static final long DEF_OUTLIER_EJECT_MS = 15_000;
+    private static final long DEF_OUTLIER_EJECT_MS = 5_000;
     private static final double DEF_OUTLIER_LAT_MULT = 2.5;
     private static final long DEF_STALE_MS_FOR_RATIO = 30_000;
 
-    private static final long DEF_REENTRY_COOLDOWN_MS = 5_000;
+    private static final long DEF_REENTRY_COOLDOWN_MS = 0;
     private static final long DEF_OUTLIER_TICK_INTERVAL_MS = 1_000;
 
     private static final int DEF_METHOD_MAX_ENTRIES = 512;

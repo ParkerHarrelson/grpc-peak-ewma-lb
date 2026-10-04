@@ -78,10 +78,13 @@ A 2 ms method at 2,000 rps and a 1 s method at 5 rps therefore behave the same *
 simulation the same 3×-slow backend gets 0.2–2% of traffic across that whole range, versus
 0.1–7.5% with the old fixed 1 s half-life (`AdversarialScaleTest`).
 
-**Outlier ejection.** A background tick looks at each backend per method. A backend whose error rate
-over the window crosses `outlierErrorRate` is ejected entirely. A backend that is slow for one method
+**Outlier ejection.** A background tick looks at each backend per method. A backend is ejected entirely when
+it is statistically clear (95% lower bound) that its error rate exceeds `outlierErrorRate`;
+only backend-health failures count (`UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, …), not
+application errors such as `NOT_FOUND`. Ejections back off: each repeat lasts one more base
+period, and healthy time forgives it. A backend that is slow for one method
 compared with the fleet's median for it is ejected for that method only. At least one backend can
-always be ejected, and at least one always stays in rotation. A re-entry cooldown prevents flapping.
+always be ejected, and at least one always stays in rotation. A returned backend is only re-ejected on fresh evidence, and repeat ejections back off.
 
 RTTs come from a `ClientStreamTracer` attached to each pick, so no interceptors are needed.
 
@@ -107,10 +110,10 @@ ManagedChannelBuilder.forTarget("dns:///my-service.internal:9090")
 | Key                            | Default  | Meaning                                                        |
 |--------------------------------|----------|----------------------------------------------------------------|
 | `outlierEnabled`               | `true`   | Enable outlier ejection                                        |
-| `outlierErrorRate`             | `0.20`   | Error rate that ejects a backend                               |
+| `outlierErrorRate`             | `0.20`   | Backend-health error rate that ejects a backend (judged statistically) |
 | `outlierLatencyMultiplier`     | `2.5`    | How many times slower than the fleet median ejects a method (adjusted for noise) |
-| `outlierEjectMillis`           | `15000`  | How long an ejected backend stays out                          |
-| `outlierReentryCooldownMillis` | `5000`   | Minimum time between re-entry and another ejection             |
+| `outlierEjectMillis`           | `5000`   | Base ejection time; each repeat ejection adds one more (backoff, ≤ 5 min) |
+| `outlierReentryCooldownMillis` | `0`      | Optional extra wait before a returned backend can be re-ejected (re-ejection already requires fresh evidence) |
 | `outlierTickIntervalMillis`    | `1000`   | Outlier evaluation period (min 100)                            |
 | `initialRttMicros`             | `50000`  | Latency assumed before anything has been measured anywhere     |
 | `methodMaxEntries`             | `512`    | Max tracked methods per subchannel                             |

@@ -1,0 +1,35 @@
+name: benchmarks
+
+# Manual: compare peak_ewma_p2c with grpc-java's built-in policies (CPU, allocation, pick cost,
+# with 95% CIs). Shared runners are noisy; compare runs on the same runner type only.
+on:
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: "FAST_RIGOROUS (~8 min) or QUICK (~5 min)"
+        type: choice
+        options: [FAST_RIGOROUS, QUICK]
+        default: FAST_RIGOROUS
+        required: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Run benchmarks
+        env:
+          PRESET: ${{ inputs.preset }}
+        run: |
+          if [ "$PRESET" = QUICK ]; then export QUICK=1; else export FAST_RIGOROUS=1; fi
+          peak-ewma-bench/run-benchmarks.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: peak-ewma-bench/target/report/
