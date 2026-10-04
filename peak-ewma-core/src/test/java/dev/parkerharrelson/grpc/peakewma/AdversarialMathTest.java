@@ -108,7 +108,6 @@ class AdversarialMathTest {
      * constant (unit mismatch: micros treated as millis).
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void warmupDuration_actuallyAdaptsToLatency() {
         java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(T0);
         EwmaClocks clocks = new EwmaClocks(now::get);
@@ -124,7 +123,6 @@ class AdversarialMathTest {
 
     /** Documented knobs that are silently overridden by hard-coded clamps. */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void inflightWeight_zero_disablesInflightPenalty() {
         PeakEwmaConfig cfg = PeakEwmaConfig.builder().inflightWeight(0.0).build();
         assertThat(PeakEwmaTuner.inflightWeightEff(10, 1, cfg))
@@ -133,7 +131,6 @@ class AdversarialMathTest {
     }
 
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void inflightWeight_large_isHonoured() {
         PeakEwmaConfig cfg = PeakEwmaConfig.builder().inflightWeight(1.0).build();
         assertThat(PeakEwmaTuner.inflightWeightEff(1, 1, cfg))
@@ -142,7 +139,6 @@ class AdversarialMathTest {
     }
 
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void tauFastMillis_isHonoured() {
         PeakEwmaConfig cfg = PeakEwmaConfig.builder().tauFastMillis(10_000).build();
         MethodStats ms = new MethodStats(5_000, T0);
@@ -157,7 +153,6 @@ class AdversarialMathTest {
      * (gap / window) rotations wipes the entire ring again, so freshly recorded results disappear.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void errorWindow_keepsResults_afterIdleGap() {
         ErrorWindow w = new ErrorWindow(10_000); // 10 x 1 s buckets
         w.recordResult(true, T0);
@@ -177,7 +172,6 @@ class AdversarialMathTest {
      * window size, minSamples, and warmup thresholds).
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void errorWindow_rateEstimate_survivesResize() {
         ErrorWindow w = new ErrorWindow(45_000);
         long t = T0;
