@@ -23,8 +23,10 @@ final class PeakEwmaTuner {
 
     static double methodRatePerSec(ErrorWindow win, long nowNanos) {
         var snap = win.snapshot(nowNanos);
-        double windowSec = Math.max(0.001, win.currentWindowMillis() / 1000.0);
-        return snap.total / windowSec;
+        // Divide by the time the buckets really cover, not the current configured window: the
+        // window is resized every tick, and old buckets keep the width they were opened with.
+        double coveredSec = Math.max(0.001, win.coveredNanos(nowNanos) / 1e9);
+        return snap.total / coveredSec;
     }
 
     static double coeffVarFromEwma(MethodStats ms) {
@@ -35,18 +37,21 @@ final class PeakEwmaTuner {
 
     static long tauFastMillis(MethodStats ms, PeakEwmaConfig cfg) {
         double cv = coeffVarFromEwma(ms);
+        // Adapt around the CONFIGURED half-life (clamps are relative to it); with the default
+        // 1000 ms this is the same [300, 2000] ms range as before.
         double base = cfg.tauFastMillis;
-        double min = 300.0;
-        double max = 2000.0;
+        double min = 0.3 * base;
+        double max = 2.0 * base;
         double scale = 1.0 / (1.0 + 1.5 * cv);
         return (long) Math.rint(clamp(base * scale, min, max));
     }
 
     static long tauSlowMillis(MethodStats ms, PeakEwmaConfig cfg) {
         double cv = coeffVarFromEwma(ms);
+        // Relative to the configured value; default 30 s gives the previous [15, 60] s range.
         double base = cfg.tauSlowMillis;
-        double min = 15_000.0;
-        double max = 60_000.0;
+        double min = 0.5 * base;
+        double max = 2.0 * base;
         double scale = 1.0 / (1.0 + 0.5 * cv);
         return (long) Math.rint(clamp(base * scale, min, max));
     }
@@ -62,9 +67,11 @@ final class PeakEwmaTuner {
     }
 
     static double inflightWeightEff(int readyCount, int medianInflight, PeakEwmaConfig cfg) {
+        // Relative to the configured weight (default 0.15 gives the previous [0.05, 0.30]), so
+        // inflightWeight=0 disables the penalty and larger values are honoured.
         double base = cfg.inflightWeight;
         double factor = Math.sqrt(Math.max(1.0, readyCount) / Math.max(1.0, medianInflight));
-        return clamp(base * factor, 0.05, 0.30);
+        return clamp(base * factor, base / 3.0, base * 2.0);
     }
 
     static long warmupMillisEff(MethodTable table) {
@@ -72,8 +79,10 @@ final class PeakEwmaTuner {
         // on every pick; the cache is refreshed on pruneStale (periodic) so this value is at
         // most one tick behind the true median, which is well within the tuner's 300–3000 ms
         // clamp.
-        long rttSeed = table.cachedSeedMicros();
-        return (long) Math.rint(clamp(0.5 * rttSeed * 150, 300.0, 3000.0));
+        // 75 typical RTTs of warmup, in milliseconds. The seed is in MICROseconds; the old
+        // formula used it as milliseconds, so every result clamped to 3000 ms.
+        double rttSeedMillis = table.cachedSeedMicros() / 1000.0;
+        return (long) Math.rint(clamp(75.0 * rttSeedMillis, 300.0, 3000.0));
     }
 
     static long windowMillisEff(double lambdaMethod, double lambdaFleet) {
@@ -85,6 +94,23 @@ final class PeakEwmaTuner {
     static int maxEjectionPercentEff(int readyCount) {
         int v = (int) Math.round(10 + 5 * log2(Math.max(1.0, readyCount)));
         return clamp(v, 10, 50);
+    }
+
+    /**
+     * Maximum peers that may be ejected at once: the percentage cap, but never less than one.
+     * Without the floor, 1 of n exceeds the cap for every n < 5, so small fleets could never eject
+     * anything (grpc's outlier_detection likewise always allows the first ejection).
+     */
+    static int maxEjectedCountEff(int readyCount) {
+        if (readyCount < 2) return 0;
+        return Math.max(
+                1, (int) Math.floor(readyCount * maxEjectionPercentEff(readyCount) / 100.0));
+    }
+
+    /** Peers that must stay in rotation after an ejection; never more than readyCount - 1. */
+    static int minReadyAfterEjectEff(int readyCount) {
+        int v = (int) Math.ceil(minReadyFractionAfterEjectEff(readyCount) * readyCount);
+        return Math.min(v, Math.max(1, readyCount - 1));
     }
 
     static double minReadyFractionAfterEjectEff(int readyCount) {

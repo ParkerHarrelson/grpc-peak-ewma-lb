@@ -31,6 +31,13 @@ public class ErrorWindow {
 
     private final AtomicInteger headIndex = new AtomicInteger(0);
 
+    // Width each closed bucket was opened with, and how many closed buckets (behind the head)
+    // hold live data. Written under ringLock; read racily for the rate estimate. Needed because
+    // setWindowMillis changes the width of future buckets only: dividing by the CURRENT window
+    // inflated the rate ~5x right after a 45 s -> 8 s resize.
+    private final long[] closedWidthNanos;
+    private volatile int closedBuckets;
+
     private final ReentrantLock ringLock = new ReentrantLock();
 
     public ErrorWindow(long initialWindowMillis) {
@@ -42,6 +49,7 @@ public class ErrorWindow {
         this.buckets = buckets;
         this.success = new LongAdder[buckets];
         this.err = new LongAdder[buckets];
+        this.closedWidthNanos = new long[buckets];
         for (int i = 0; i < buckets; i++) {
             success[i] = new LongAdder();
             err[i] = new LongAdder();
@@ -109,12 +117,27 @@ public class ErrorWindow {
                 return headIndex.get();
             }
 
-            int steps = (int) Math.clamp(elapsed / curBw, 0L, buckets);
-            for (int i = 0; i < steps; i++) {
-                int next = (headIndex.get() + 1) % buckets;
+            if (elapsed >= curBw * buckets) {
+                // Idle for at least a whole window: everything is stale. Start over from now.
+                // (Advancing by at most one window per call left startNanos far behind, so
+                // every following call wiped the ring again, freshly recorded results included.)
+                for (int i = 0; i < buckets; i++) {
+                    success[i].reset();
+                    err[i].reset();
+                }
+                closedBuckets = 0;
+                startNanos.set(nowNanos);
+                return headIndex.get();
+            }
+            long steps = elapsed / curBw;
+            for (long i = 0; i < steps; i++) {
+                int head = headIndex.get();
+                closedWidthNanos[head] = curBw;
+                int next = (head + 1) % buckets;
                 headIndex.set(next);
                 success[next].reset();
                 err[next].reset();
+                closedBuckets = Math.min(buckets - 1, closedBuckets + 1);
             }
             startNanos.addAndGet(steps * curBw);
             return headIndex.get();
@@ -166,9 +189,30 @@ public class ErrorWindow {
             }
             startNanos.set(0L);
             headIndex.set(0);
+            closedBuckets = 0;
         } finally {
             ringLock.unlock();
         }
+    }
+
+    /**
+     * Wall time actually covered by the live buckets: the closed buckets at the widths they were
+     * opened with, plus the elapsed part of the head bucket. Never less than one bucket width, so a
+     * window that just started doesn't report an absurd rate from a handful of calls.
+     *
+     * @param nowNanos current nano-time
+     * @return covered time in nanoseconds
+     */
+    public long coveredNanos(long nowNanos) {
+        rotateAndGetHead(nowNanos);
+        long start = startNanos.get();
+        long covered = start == 0L ? 0L : Math.max(0L, nowNanos - start);
+        int head = headIndex.get();
+        int closed = closedBuckets;
+        for (int i = 1; i <= closed; i++) {
+            covered += closedWidthNanos[Math.floorMod(head - i, buckets)];
+        }
+        return Math.max(covered, bucketWidthNanos.get());
     }
 
     /**

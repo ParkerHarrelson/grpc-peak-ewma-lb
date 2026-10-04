@@ -108,6 +108,11 @@ public final class P2CPicker extends SubchannelPicker {
         }
 
         final String method = methodName(args.getMethodDescriptor());
+        // Only unary calls are latency samples; a streaming call's duration is its lifetime.
+        final boolean recordLatency =
+                args.getMethodDescriptor() == null
+                        || args.getMethodDescriptor().getType()
+                                == MethodDescriptor.MethodType.UNARY;
         final long now = clocks.nanoTime();
         final int n = readyPool.size();
 
@@ -121,7 +126,7 @@ public final class P2CPicker extends SubchannelPicker {
             LoadBalancer.Subchannel only = readyPool.get(0);
             if (!Double.isInfinite(cost(only, method, now))) {
                 metrics.recordPick(OK);
-                return buildPickResult(only, method);
+                return buildPickResult(only, method, recordLatency);
             }
         } else {
             ThreadLocalRandom rnd = ThreadLocalRandom.current();
@@ -150,10 +155,10 @@ public final class P2CPicker extends SubchannelPicker {
                                 ? readyPool.get(i1)
                                 : readyPool.get(i2);
                 metrics.recordPick(OK);
-                return buildPickResult(chosen, method);
+                return buildPickResult(chosen, method, recordLatency);
             }
         }
-        return pickByScan(method, now, n);
+        return pickByScan(method, now, n, recordLatency);
     }
 
     /** A uniformly random index in [0, n) other than {@code exclude}; requires n >= 2. */
@@ -166,7 +171,7 @@ public final class P2CPicker extends SubchannelPicker {
      * Slow path: score every peer, then best-of-two among the live ones. Only reached when
      * resampling could not find two live peers.
      */
-    private PickResult pickByScan(String method, long now, int n) {
+    private PickResult pickByScan(String method, long now, int n, boolean recordLatency) {
         int[] idx = new int[n];
         double[] costs = new double[n];
         int m = 0;
@@ -188,7 +193,7 @@ public final class P2CPicker extends SubchannelPicker {
                 return PickResult.withNoResult();
             }
             metrics.recordPick(OK_FALLBACK);
-            return buildPickResult(best, method);
+            return buildPickResult(best, method, recordLatency);
         }
 
         final LoadBalancer.Subchannel chosen;
@@ -214,10 +219,11 @@ public final class P2CPicker extends SubchannelPicker {
         }
 
         metrics.recordPick(OK);
-        return buildPickResult(chosen, method);
+        return buildPickResult(chosen, method, recordLatency);
     }
 
-    private PickResult buildPickResult(LoadBalancer.Subchannel sc, String method) {
+    private PickResult buildPickResult(
+            LoadBalancer.Subchannel sc, String method, boolean recordLatency) {
         MethodTable methodTable = tables.get(sc);
         if (methodTable == null) {
             metrics.recordPick(NO_TABLE);
@@ -229,7 +235,7 @@ public final class P2CPicker extends SubchannelPicker {
 
         EwmaClientStreamTracerFactory tracerFactory =
                 new EwmaClientStreamTracerFactory(
-                        methodTable, ewmaConfig, clocks, method, inc, dec, metrics);
+                        methodTable, ewmaConfig, clocks, method, inc, dec, metrics, recordLatency);
 
         return PickResult.withSubchannel(sc, tracerFactory);
     }

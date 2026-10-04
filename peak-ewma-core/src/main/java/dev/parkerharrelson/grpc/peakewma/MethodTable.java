@@ -70,6 +70,15 @@ public final class MethodTable {
     }
 
     /**
+     * @return when {@code method}'s most recent ejection ends (nano-time), or {@link
+     *     Long#MIN_VALUE} if it was never ejected; used for the re-entry cooldown
+     */
+    public long methodEjectedUntilNanos(String method) {
+        Long until = methodEjectedUntilNanos.get(method);
+        return until == null ? Long.MIN_VALUE / 2 : until;
+    }
+
+    /**
      * @return true if {@code method} was recently ejected and the ejection has not yet expired
      */
     public boolean isMethodEjected(String method, long nowNanos) {

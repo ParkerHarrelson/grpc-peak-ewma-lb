@@ -147,6 +147,36 @@ class EwmaClientStreamTracerTest {
     }
 
     @Test
+    void streamingCall_isNotALatencySample_butStillCountsInWindowAndInflight() {
+        ManualClock mc = new ManualClock(3_000_000_000L);
+        EwmaClocks clocks = new EwmaClocks(mc);
+        PeakEwmaConfig c = cfg();
+        MethodStats ms = new MethodStats(c.initialRttMicros, 0L);
+        ErrorWindow win = new ErrorWindow(10, 1000);
+        AtomicInteger dec = new AtomicInteger();
+        EwmaClientStreamTracer tracer =
+                new EwmaClientStreamTracer(
+                        ms,
+                        c,
+                        clocks,
+                        null,
+                        dec::incrementAndGet,
+                        win,
+                        NoopLbMetrics.INSTANCE,
+                        "svc/Watch",
+                        /* recordLatency= */ false);
+
+        tracer.streamCreated(Attributes.EMPTY, new Metadata());
+        mc.advanceNanos(60_000_000_000L); // a normal 60 s watch stream
+        tracer.streamClosed(Status.OK);
+
+        assertEquals(0, ms.getSamples(), "stream lifetime must not be recorded as latency");
+        assertEquals(c.initialRttMicros, ms.getEwmaFastMicros(), 1e-6);
+        assertEquals(1, win.snapshot(mc.now()).total);
+        assertEquals(1, dec.get());
+    }
+
+    @Test
     void streamClosed_errorRecordsError_inWindow_andStillUpdatesDec() {
         ManualClock mc = new ManualClock(3_000_000_000L);
         EwmaClocks clocks = new EwmaClocks(mc);
