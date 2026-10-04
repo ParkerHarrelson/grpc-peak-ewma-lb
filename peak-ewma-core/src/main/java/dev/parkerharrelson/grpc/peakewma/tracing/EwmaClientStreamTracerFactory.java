@@ -20,6 +20,7 @@ public final class EwmaClientStreamTracerFactory extends ClientStreamTracer.Fact
     private final Runnable onInc;
     private final Runnable onDec;
     private final LbMetrics metrics;
+    private final boolean recordLatency;
 
     /** Delegates to the full constructor with a no-op metrics sink. */
     public EwmaClientStreamTracerFactory(
@@ -49,6 +50,24 @@ public final class EwmaClientStreamTracerFactory extends ClientStreamTracer.Fact
             Runnable onInc,
             Runnable onDec,
             LbMetrics metrics) {
+        this(table, cfg, clocks, method, onInc, onDec, metrics, true);
+    }
+
+    /**
+     * @param recordLatency whether this call's duration is a latency sample. False for streaming
+     *     RPCs, whose duration is the stream's lifetime (seconds to hours) and would poison the
+     *     method's EWMAs; their outcome still feeds the error window and penalty.
+     */
+    public EwmaClientStreamTracerFactory(
+            MethodTable table,
+            PeakEwmaConfig cfg,
+            EwmaClocks clocks,
+            String method,
+            Runnable onInc,
+            Runnable onDec,
+            LbMetrics metrics,
+            boolean recordLatency) {
+        this.recordLatency = recordLatency;
         this.table = table;
         this.cfg = cfg;
         this.clocks = clocks;
@@ -64,6 +83,6 @@ public final class EwmaClientStreamTracerFactory extends ClientStreamTracer.Fact
         var stats = table.statsFor(method);
         var window = table.windowFor(method);
         return new EwmaClientStreamTracer(
-                stats, cfg, clocks, onInc, onDec, window, metrics, method);
+                stats, cfg, clocks, onInc, onDec, window, metrics, method, recordLatency);
     }
 }

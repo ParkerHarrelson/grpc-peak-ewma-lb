@@ -35,6 +35,7 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
     private final ErrorWindow window;
     private final LbMetrics metrics;
     private final String method;
+    private final boolean recordLatency;
 
     // volatile so streamClosed observes the writes made in streamCreated even when gRPC
     // dispatches the two callbacks from different threads.
@@ -51,6 +52,21 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             ErrorWindow window,
             LbMetrics metrics,
             String method) {
+        this(stats, cfg, clocks, onInc, onDec, window, metrics, method, true);
+    }
+
+    @SuppressWarnings("java:S107")
+    EwmaClientStreamTracer(
+            MethodStats stats,
+            PeakEwmaConfig cfg,
+            EwmaClocks clocks,
+            Runnable onInc,
+            Runnable onDec,
+            ErrorWindow window,
+            LbMetrics metrics,
+            String method,
+            boolean recordLatency) {
+        this.recordLatency = recordLatency;
         this.stats = stats;
         this.cfg = cfg;
         this.clocks = clocks;
@@ -89,10 +105,10 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             long rtt = (startNanos == 0L) ? 0L : Math.max(0L, end - startNanos);
 
             boolean serverFailure = isServerFailure(status);
-            if (rtt > 0L || serverFailure) {
+            if (serverFailure || (recordLatency && rtt > 0L)) {
                 stats.update(end, rtt, cfg, serverFailure);
             }
-            if (rtt > 0L) {
+            if (recordLatency && rtt > 0L) {
                 metrics.recordObservedRtt(method, rtt);
             }
             window.recordResult(status.isOk(), end);

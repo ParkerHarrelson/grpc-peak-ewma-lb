@@ -239,14 +239,13 @@ class AdversarialSimulationTest {
      * fast/slow ratio ejects the whole backend.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void longLivedStream_doesNotEjectBackend() {
         AdversarialFixture f = fleet(10, 5.0);
         f.run(2000, 10_000, METHOD_A, METHOD_B);
         int target = warmestPort(f, METHOD_B.getFullMethodName());
         io.grpc.LoadBalancer.PickResult watch = null;
         for (int i = 0; i < 10_000 && watch == null; i++) {
-            var pr = f.pick(METHOD_B);
+            var pr = f.pick(AdversarialFixture.METHOD_WATCH); // a real server-streaming method
             if (AdversarialFixture.portOf(pr.getSubchannel()) == target) watch = pr;
         }
         assertThat(watch).as("got a pick on the warm backend").isNotNull();

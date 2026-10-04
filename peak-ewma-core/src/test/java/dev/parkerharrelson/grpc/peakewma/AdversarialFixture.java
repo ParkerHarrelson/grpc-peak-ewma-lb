@@ -59,6 +59,8 @@ final class AdversarialFixture {
 
     static final MethodDescriptor<byte[], byte[]> METHOD_A = method("svc/A");
     static final MethodDescriptor<byte[], byte[]> METHOD_B = method("svc/B");
+    static final MethodDescriptor<byte[], byte[]> METHOD_WATCH =
+            method("svc/Watch", MethodDescriptor.MethodType.SERVER_STREAMING);
 
     final AtomicLong now = new AtomicLong(T0);
     final EwmaClocks clocks = new EwmaClocks(now::get);
@@ -614,6 +616,11 @@ final class AdversarialFixture {
     }
 
     static MethodDescriptor<byte[], byte[]> method(String fullName) {
+        return method(fullName, MethodDescriptor.MethodType.UNARY);
+    }
+
+    static MethodDescriptor<byte[], byte[]> method(
+            String fullName, MethodDescriptor.MethodType type) {
         MethodDescriptor.Marshaller<byte[]> m =
                 new MethodDescriptor.Marshaller<>() {
                     @Override
@@ -627,7 +634,7 @@ final class AdversarialFixture {
                     }
                 };
         return MethodDescriptor.<byte[], byte[]>newBuilder()
-                .setType(MethodDescriptor.MethodType.UNARY)
+                .setType(type)
                 .setFullMethodName(fullName)
                 .setRequestMarshaller(m)
                 .setResponseMarshaller(m)
