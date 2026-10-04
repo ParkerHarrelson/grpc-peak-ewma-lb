@@ -66,6 +66,13 @@ class PeakEwmaP2CBalancerOutlierTickEjectTest {
         }
 
         @Override
+        public void refreshNameResolution() {
+
+            // real channels re-resolve; nothing to do in tests
+
+        }
+
+        @Override
         public SynchronizationContext getSynchronizationContext() {
             return syncCtx;
         }

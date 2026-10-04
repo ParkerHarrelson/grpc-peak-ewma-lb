@@ -9,7 +9,6 @@ import io.grpc.ConnectivityStateInfo;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.Status;
 import java.util.Map;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -17,7 +16,6 @@ import org.junit.jupiter.api.Test;
  * (pick_first, round_robin, least_request, ...) follows. Each test asserts the CORRECT behaviour; a
  * failure means the bug is present.
  */
-@Tag("adversarial")
 class AdversarialLbContractTest {
 
     private static final PeakEwmaConfig CFG = PeakEwmaConfig.DEFAULTS;
@@ -116,12 +114,23 @@ class AdversarialLbContractTest {
                 .isFalse();
     }
 
-    /** An empty resolution must surface as an error, not CONNECTING forever. */
+    /**
+     * An empty resolution must be rejected (non-OK status, so the channel re-resolves) and, when
+     * nothing is READY, surface as TRANSIENT_FAILURE rather than CONNECTING forever. (Same as
+     * grpc's MultiChildLoadBalancer: while READY, existing subchannels keep serving.)
+     */
     @Test
-    void emptyAddressList_reportsTransientFailure() {
+    void emptyAddressList_isRejected_andReportsTransientFailure() {
         AdversarialFixture f = new AdversarialFixture(CFG);
-        f.resolveAndReady(5001);
-        f.resolve();
+        Status[] result = new Status[1];
+        f.helper.syncCtx.execute(
+                () ->
+                        result[0] =
+                                f.balancer.acceptResolvedAddresses(
+                                        io.grpc.LoadBalancer.ResolvedAddresses.newBuilder()
+                                                .setAddresses(java.util.List.of())
+                                                .build()));
+        assertThat(result[0].isOk()).as("acceptResolvedAddresses([]) status").isFalse();
         assertThat(f.latest().state()).isEqualTo(ConnectivityState.TRANSIENT_FAILURE);
     }
 

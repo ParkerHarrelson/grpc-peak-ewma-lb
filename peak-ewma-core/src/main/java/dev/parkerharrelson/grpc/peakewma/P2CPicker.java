@@ -18,6 +18,12 @@ import java.util.concurrent.ThreadLocalRandom;
 public final class P2CPicker extends SubchannelPicker {
     private static final double EPS = 1e-6;
 
+    /**
+     * Resamples allowed to replace an ejected peer before falling back to a full scan. Ejection is
+     * capped at 50% of the fleet, so the fallback runs for at most ~0.5^8 = 0.4% of picks.
+     */
+    private static final int MAX_RESAMPLES = 8;
+
     private final List<LoadBalancer.Subchannel> readyPool;
     private final Map<LoadBalancer.Subchannel, MethodTable> tables;
     private final Map<LoadBalancer.Subchannel, SubchannelState> states;
@@ -103,8 +109,64 @@ public final class P2CPicker extends SubchannelPicker {
 
         final String method = methodName(args.getMethodDescriptor());
         final long now = clocks.nanoTime();
-
         final int n = readyPool.size();
+
+        // Fast path, O(1): sample two distinct peers and score only those. An ejected sample is
+        // replaced by resampling just that slot, so every pick is still a best-of-two
+        // comparison between live peers. Accepting the surviving peer unopposed would turn
+        // ~2e of picks into a plain random choice when a fraction e of the fleet is ejected.
+        // Only when resampling keeps missing (very dense ejection, or tiny pools) do we fall
+        // back to scanning the whole pool.
+        if (n == 1) {
+            LoadBalancer.Subchannel only = readyPool.get(0);
+            if (!Double.isInfinite(cost(only, method, now))) {
+                metrics.recordPick(OK);
+                return buildPickResult(only, method);
+            }
+        } else {
+            ThreadLocalRandom rnd = ThreadLocalRandom.current();
+            // Uniform over ordered pairs of distinct indices.
+            int i1 = rnd.nextInt(n);
+            int i2 = rnd.nextInt(n - 1);
+            if (i2 >= i1) i2++;
+            double ca = cost(readyPool.get(i1), method, now);
+            double cb = cost(readyPool.get(i2), method, now);
+            for (int attempt = 0;
+                    attempt < MAX_RESAMPLES && (Double.isInfinite(ca) || Double.isInfinite(cb));
+                    attempt++) {
+                if (Double.isInfinite(ca)) {
+                    i1 = otherIndex(rnd, n, i2);
+                    ca = cost(readyPool.get(i1), method, now);
+                } else {
+                    i2 = otherIndex(rnd, n, i1);
+                    cb = cost(readyPool.get(i2), method, now);
+                }
+            }
+            if (!Double.isInfinite(ca) && !Double.isInfinite(cb)) {
+                // Sub-promille jitter breaks exact ties so identical peers don't lock-step
+                // onto one subchannel.
+                LoadBalancer.Subchannel chosen =
+                        ca * (1.0 + 1e-4 * rnd.nextDouble()) <= cb * (1.0 + 1e-4 * rnd.nextDouble())
+                                ? readyPool.get(i1)
+                                : readyPool.get(i2);
+                metrics.recordPick(OK);
+                return buildPickResult(chosen, method);
+            }
+        }
+        return pickByScan(method, now, n);
+    }
+
+    /** A uniformly random index in [0, n) other than {@code exclude}; requires n >= 2. */
+    private static int otherIndex(ThreadLocalRandom rnd, int n, int exclude) {
+        int i = rnd.nextInt(n - 1);
+        return i >= exclude ? i + 1 : i;
+    }
+
+    /**
+     * Slow path: score every peer, then best-of-two among the live ones. Only reached when
+     * resampling could not find two live peers.
+     */
+    private PickResult pickByScan(String method, long now, int n) {
         int[] idx = new int[n];
         double[] costs = new double[n];
         int m = 0;
@@ -184,7 +246,7 @@ public final class P2CPicker extends SubchannelPicker {
                 continue;
             }
 
-            MethodStats methodStats = methodTable.statsFor(method);
+            MethodStats methodStats = methodTable.peekStats(method);
             double cost = costIgnoringEjection(methodStats, methodTable);
             long lastEnd = subchannelState.lastEjectEndNanos();
 
@@ -202,7 +264,7 @@ public final class P2CPicker extends SubchannelPicker {
         // warmup, since the goal is simply to find the least-bad option until real ejections
         // expire. Score on the peak EWMA (fast) so the same "best observed latency" metric
         // drives both the main and fallback picks.
-        double score = Math.max(EPS, ms.getEwmaFastMicros());
+        double score = Math.max(EPS, ms != null ? ms.getEwmaFastMicros() : mt.cachedSeedMicros());
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
         return score * busy;
     }
@@ -211,7 +273,9 @@ public final class P2CPicker extends SubchannelPicker {
         MethodTable methodTable = tables.get(subchannel);
         if (methodTable == null) return Double.POSITIVE_INFINITY;
 
-        MethodStats methodStats = methodTable.statsFor(method);
+        // Read-only lookup: scoring must not materialise per-method state on peers that are not
+        // picked (the tracer creates it for the peer that actually serves the call).
+        MethodStats methodStats = methodTable.peekStats(method);
         SubchannelState subchannelState = states.get(subchannel);
         if (subchannelState == null) return Double.POSITIVE_INFINITY;
 
@@ -233,9 +297,9 @@ public final class P2CPicker extends SubchannelPicker {
      * balancer's metric emission path so that the {@code lb.subchannel.method.cost} gauge always
      * matches the value the picker would actually score against.
      *
-     * <p>Warm peers score on the fast (peak) EWMA so a slow spike is penalised immediately. Cold
-     * peers (too few samples or stale) fall back to the slow EWMA, which is seeded from config or
-     * historical methods and is more stable before fast has real data. Multiplied by a busy factor
+     * <p>Every peer scores on its fast (peak) EWMA decayed to {@code now}, so a slow spike is
+     * penalised immediately and wears off with time, and unmeasured peers (still on their seed)
+     * become cheap enough to be probed within a few half-lives. Multiplied by a busy factor
      * (inflight weight) and a warmup factor that decays from 2.0 → 1.0 over the first warmupMsEff
      * milliseconds of readiness.
      *
@@ -250,11 +314,16 @@ public final class P2CPicker extends SubchannelPicker {
             long now,
             double inflightWeightEff,
             PeakEwmaConfig cfg) {
-        boolean cold = isColdAdaptive(mt, ms, method, now, cfg);
         double score =
-                cold
-                        ? Math.max(EPS, ms.getEwmaSlowMicros())
-                        : Math.max(EPS, ms.getEwmaFastMicros());
+                Math.max(
+                        EPS,
+                        ms != null
+                                ? decayedPeakMicros(ms, now, cfg)
+                                // Never served this method: its seed, decayed since the peer
+                                // became READY, so long-ready peers get probed for new methods.
+                                : mt.cachedSeedMicros()
+                                        * EwmaClocks.decayFactor(
+                                                now, st.readySinceNanos(), cfg.tauFastMillis));
 
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
 
@@ -271,27 +340,17 @@ public final class P2CPicker extends SubchannelPicker {
         return score * busy * warm;
     }
 
-    static boolean isColdAdaptive(
-            MethodTable mt, MethodStats ms, String method, long now, PeakEwmaConfig cfg) {
-        int numSamples = ms.getSamples();
-
-        var window = mt.windowFor(method);
-        double lambda = PeakEwmaTuner.methodRatePerSec(window, now);
-
-        int minSamples = PeakEwmaTuner.minSamplesForRatioEff(lambda);
-        long minWarmMs = PeakEwmaTuner.minWarmupMillisForRatioEff(lambda);
-
-        boolean enoughSamples = numSamples >= minSamples;
-
-        long first = ms.getFirstSampleNanos();
-        long sinceFirst = (first == 0L) ? Long.MAX_VALUE : (now - first);
-        boolean enoughTime = sinceFirst >= EwmaClocks.millisToNanos(minWarmMs);
-
-        long sinceLastUpdate = now - ms.getLastUpdateNanos();
-        final long STALE_NANOS = EwmaClocks.millisToNanos(cfg.staleMillisForRatio);
-        boolean stale = sinceLastUpdate >= STALE_NANOS;
-
-        return !(enoughSamples && enoughTime) || stale;
+    /**
+     * The peak EWMA decayed to {@code now}. Decay is applied at read time, not only when a sample
+     * arrives: P2C stops sending traffic to a backend whose score spiked, so without read-time
+     * decay the spike would never wear off (and a never-picked backend would never be probed).
+     * Decaying toward zero is the standard Peak-EWMA behaviour (Finagle, tower): an idle backend's
+     * cost shrinks until it gets picked again and re-measured.
+     */
+    static double decayedPeakMicros(MethodStats ms, long now, PeakEwmaConfig cfg) {
+        long tauFastEff = PeakEwmaTuner.tauFastMillis(ms, cfg);
+        return ms.getEwmaFastMicros()
+                * EwmaClocks.decayFactor(now, ms.getLastUpdateNanos(), tauFastEff);
     }
 
     private static String methodName(MethodDescriptor<?, ?> methodDescriptor) {

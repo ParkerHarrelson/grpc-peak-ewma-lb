@@ -49,6 +49,14 @@ public final class MethodTable {
     }
 
     /**
+     * @return the stats for {@code method}, or {@code null} if this subchannel has never served it.
+     *     Read-only: unlike {@link #statsFor(String)} it never creates an entry.
+     */
+    public MethodStats peekStats(String method) {
+        return methods.get(method);
+    }
+
+    /**
      * @return the sliding error window for the given method, creating one if needed
      */
     public ErrorWindow windowFor(String method) {

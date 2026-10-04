@@ -71,6 +71,13 @@ class PeakEwmaP2CBalancerTest {
         }
 
         @Override
+        public void refreshNameResolution() {
+
+            // real channels re-resolve; nothing to do in tests
+
+        }
+
+        @Override
         public SynchronizationContext getSynchronizationContext() {
             return syncCtx;
         }
@@ -566,6 +573,20 @@ class PeakEwmaP2CBalancerTest {
     }
 
     @Test
+    void idleSubchannel_isAlwaysAskedToReconnect() {
+        var a = new EquivalentAddressGroup(new InetSocketAddress("127.0.0.1", 5160));
+        balancer.handleResolvedAddresses(
+                LoadBalancer.ResolvedAddresses.newBuilder().setAddresses(List.of(a)).build());
+        FakeSubchannel sc = helper.created.get(0);
+        sc.drive(READY);
+        int before = sc.reqConn.get();
+
+        sc.drive(IDLE); // e.g. server GOAWAY
+
+        assertEquals(before + 1, sc.reqConn.get());
+    }
+
+    @Test
     void handleNoReadySubchannels_debouncesRequestConnectionPerSubchannel() {
         var a = new EquivalentAddressGroup(new InetSocketAddress("127.0.0.1", 5150));
         balancer.handleResolvedAddresses(
@@ -575,12 +596,13 @@ class PeakEwmaP2CBalancerTest {
         // Initial handleResolvedAddresses already fired one requestConnection during creation.
         int initial = sc.reqConn.get();
 
-        // Simulate "no ready" publishes in quick succession by driving the subchannel into
-        // the idle state three times; handleNoReadySubchannels treats idle, connecting, and
-        // transient-failure states as reconnect-eligible and applies the debounce to all three.
-        sc.drive(IDLE);
-        sc.drive(IDLE);
-        sc.drive(IDLE);
+        // Simulate "no ready" publishes in quick succession. handleNoReadySubchannels treats
+        // idle, connecting and transient-failure states as reconnect-eligible and debounces
+        // them. (IDLE itself is not debounced: each IDLE report means a connection closed and,
+        // per the grpc LB contract, must be answered with requestConnection().)
+        sc.drive(CONNECTING);
+        sc.drive(CONNECTING);
+        sc.drive(CONNECTING);
 
         // Debounce should prevent more than one extra requestConnection inside the 1s window.
         int afterBurst = sc.reqConn.get();

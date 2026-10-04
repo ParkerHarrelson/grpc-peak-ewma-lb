@@ -1,6 +1,7 @@
 package dev.parkerharrelson.grpc.peakewma.tracing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.parkerharrelson.grpc.peakewma.EwmaClocks;
 import dev.parkerharrelson.grpc.peakewma.MethodStats;
@@ -172,7 +173,11 @@ class EwmaClientStreamTracerTest {
         tracer.streamClosed(Status.INTERNAL);
 
         assertEquals(1, dec.get());
-        assertEquals(1, ms.getSamples());
+        // A server failure is not a latency sample: it records a penalty in the fast EWMA
+        // (>= 2x the current estimate) so a fast-failing backend doesn't look fastest.
+        assertEquals(0, ms.getSamples());
+        assertTrue(ms.getEwmaFastMicros() >= 2.0 * c.initialRttMicros - 1e-6);
+        assertEquals(c.initialRttMicros, ms.getEwmaSlowMicros(), 1e-6);
         ErrorWindow.Snapshot snap = win.snapshot(mc.now());
         assertEquals(1, snap.total);
         assertEquals(0, snap.successes);

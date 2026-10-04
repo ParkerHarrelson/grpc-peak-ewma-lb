@@ -25,14 +25,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /** Multi-threaded stress against the real balancer and its shared mutable state. */
-@Tag("adversarial")
 class AdversarialConcurrencyTest {
 
     private static final PeakEwmaConfig CFG = PeakEwmaConfig.DEFAULTS;
+
+    /**
+     * Ticks enqueue onto the sync context. A ticker spinning with no pause can enqueue faster than
+     * the draining thread runs them, so the drain never returns (the real scheduler fires once per
+     * tick interval). A short pause keeps the race window busy without that livelock.
+     */
+    private static void pace() {
+        java.util.concurrent.locks.LockSupport.parkNanos(20_000);
+    }
 
     @SuppressWarnings("unchecked")
     private static Set<Integer> actuallyReady(AdversarialFixture f) {
@@ -81,7 +88,10 @@ class AdversarialConcurrencyTest {
                                 } catch (Exception e) {
                                     return;
                                 }
-                                while (!stop.get()) f.tick();
+                                while (!stop.get()) {
+                                    f.tick();
+                                    pace();
+                                }
                             });
             ticker.start();
             go.await();
@@ -187,6 +197,7 @@ class AdversarialConcurrencyTest {
                                 } catch (Throwable t) {
                                     errors.incrementAndGet();
                                 }
+                                pace();
                             }
                         });
         Thread churn =
@@ -317,7 +328,10 @@ class AdversarialConcurrencyTest {
         Thread ticker =
                 new Thread(
                         () -> {
-                            while (!stop.get()) f.tick();
+                            while (!stop.get()) {
+                                f.tick();
+                                pace();
+                            }
                         });
         ticker.start();
         for (int i = 0; i < 20_000; i++) {
