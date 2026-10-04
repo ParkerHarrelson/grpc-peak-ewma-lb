@@ -36,30 +36,25 @@ final class PeakEwmaTuner {
     }
 
     static long tauFastMillis(MethodStats ms, PeakEwmaConfig cfg) {
-        return tauFastMillis(coeffVarFromEwma(ms), cfg);
+        return tauFastMillis(coeffVarFromEwma(ms), ms.scale());
     }
 
-    static long tauFastMillis(double cv, PeakEwmaConfig cfg) {
-        // Adapt around the CONFIGURED half-life (clamps are relative to it); with the default
-        // 1000 ms this is the same [300, 2000] ms range as before.
-        double base = cfg.tauFastMillis;
-        double min = 0.3 * base;
-        double max = 2.0 * base;
-        double scale = 1.0 / (1.0 + 1.5 * cv);
-        return (long) Math.rint(clamp(base * scale, min, max));
+    /**
+     * Peak half-life: the method's sample-based half-life ({@link MethodScale#tauFastMillis}),
+     * shortened for noisy methods, whose peaks are mostly noise spikes, down to 30% at high CV.
+     */
+    static long tauFastMillis(double cv, MethodScale scale) {
+        double noise = clamp(1.0 / (1.0 + 1.5 * cv), 0.3, 1.0);
+        return Math.max(1L, (long) Math.rint(scale.tauFastMillis() * noise));
     }
 
     static long tauSlowMillis(MethodStats ms, PeakEwmaConfig cfg) {
-        return tauSlowMillis(coeffVarFromEwma(ms), cfg);
+        return tauSlowMillis(coeffVarFromEwma(ms), ms.scale());
     }
 
-    static long tauSlowMillis(double cv, PeakEwmaConfig cfg) {
-        // Relative to the configured value; default 30 s gives the previous [15, 60] s range.
-        double base = cfg.tauSlowMillis;
-        double min = 0.5 * base;
-        double max = 2.0 * base;
-        double scale = 1.0 / (1.0 + 0.5 * cv);
-        return (long) Math.rint(clamp(base * scale, min, max));
+    static long tauSlowMillis(double cv, MethodScale scale) {
+        double noise = clamp(1.0 / (1.0 + 0.5 * cv), 0.5, 1.0);
+        return Math.max(1L, (long) Math.rint(scale.tauSlowMillis() * noise));
     }
 
     static int minSamplesForRatioEff(double lambdaPerSec) {
@@ -72,29 +67,27 @@ final class PeakEwmaTuner {
         return clamp(v);
     }
 
+    /**
+     * Cost multiplier per outstanding unary call: cost = latency x (inflight + 1), the standard
+     * Peak-EWMA load term (Finagle, tower). Expected wait behind {@code inflight} queued calls on a
+     * backend serving them at the observed latency; there is no workload-specific weight to tune.
+     */
+    static final double INFLIGHT_WEIGHT = 1.0;
+
     static double inflightWeightEff(int readyCount, int medianInflight, PeakEwmaConfig cfg) {
-        // Relative to the configured weight (default 0.15 gives the previous [0.05, 0.30]), so
-        // inflightWeight=0 disables the penalty and larger values are honoured.
-        double base = cfg.inflightWeight;
-        double factor = Math.sqrt(Math.max(1.0, readyCount) / Math.max(1.0, medianInflight));
-        return clamp(base * factor, base / 3.0, base * 2.0);
+        return INFLIGHT_WEIGHT;
     }
 
-    static long warmupMillisEff(MethodTable table) {
-        // Use the cached seed on MethodTable rather than recomputing the median of all methods
-        // on every pick; the cache is refreshed on pruneStale (periodic) so this value is at
-        // most one tick behind the true median, which is well within the tuner's 300–3000 ms
-        // clamp.
-        // 75 typical RTTs of warmup, in milliseconds. The seed is in MICROseconds; the old
-        // formula used it as milliseconds, so every result clamped to 3000 ms.
-        double rttSeedMillis = table.cachedSeedMicros() / 1000.0;
-        return (long) Math.rint(clamp(75.0 * rttSeedMillis, 300.0, 3000.0));
-    }
-
-    static long windowMillisEff(double lambdaMethod, double lambdaFleet) {
+    /**
+     * Error-window length: long enough to hold ~200 calls of this method (the larger of its own
+     * rate and half the fleet's), never shorter than two outlier ticks (the window is only read
+     * once per tick), and at most 5 minutes.
+     */
+    static long windowMillisEff(double lambdaMethod, double lambdaFleet, long tickMillis) {
         double targetSamples = 200.0;
-        double denominator = Math.max(0.05, Math.max(lambdaMethod, 0.5 * lambdaFleet));
-        return (long) Math.rint(clamp(1000.0 * targetSamples / denominator, 8000.0, 45_000.0));
+        double denominator = Math.max(1e-3, Math.max(lambdaMethod, 0.5 * lambdaFleet));
+        return (long)
+                Math.rint(clamp(1000.0 * targetSamples / denominator, 2.0 * tickMillis, 300_000.0));
     }
 
     static int maxEjectionPercentEff(int readyCount) {

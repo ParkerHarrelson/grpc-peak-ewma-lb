@@ -27,16 +27,40 @@ public final class PeakEwmaConfig {
 
     public static final PeakEwmaConfig DEFAULTS = builder().build();
 
-    public final long tauFastMillis;
-    public final long tauSlowMillis;
-    public final double inflightWeight;
+    /**
+     * @deprecated ignored: the peak half-life is derived per method from observed traffic (~20
+     *     samples, >= 2 RTTs); see MethodScale.
+     */
+    @Deprecated public final long tauFastMillis;
+
+    /**
+     * @deprecated ignored: the baseline half-life is derived per method from observed traffic (~600
+     *     samples, >= 20 RTTs); see MethodScale.
+     */
+    @Deprecated public final long tauSlowMillis;
+
+    /**
+     * @deprecated ignored: the load term is the standard latency x (inflight + 1).
+     */
+    @Deprecated public final double inflightWeight;
+
     public final long initialRttMicros;
     public final boolean outlierEnabled;
-    public final long outlierWindowMillis;
+
+    /**
+     * @deprecated ignored: each error window is sized to ~200 calls of its method.
+     */
+    @Deprecated public final long outlierWindowMillis;
+
     public final double outlierErrorRate;
     public final long outlierEjectMillis;
     public final double outlierLatencyMultiplier;
-    public final long staleMillisForRatio;
+
+    /**
+     * @deprecated ignored: staleness is two baseline half-lives of the method.
+     */
+    @Deprecated public final long staleMillisForRatio;
+
     public final long outlierReentryCooldownMillis;
     public final long outlierTickIntervalMillis;
     public final int methodMaxEntries;
@@ -110,16 +134,30 @@ public final class PeakEwmaConfig {
             // intentional no-op
         }
 
+        /**
+         * @deprecated ignored: the peak half-life is derived per method from observed traffic (~20
+         *     samples, >= 2 RTTs); see MethodScale.
+         */
+        @Deprecated
         public Builder tauFastMillis(long v) {
             this.tauFastMillis = v;
             return this;
         }
 
+        /**
+         * @deprecated ignored: the baseline half-life is derived per method from observed traffic
+         *     (~600 samples, >= 20 RTTs); see MethodScale.
+         */
+        @Deprecated
         public Builder tauSlowMillis(long v) {
             this.tauSlowMillis = v;
             return this;
         }
 
+        /**
+         * @deprecated ignored: the load term is the standard latency x (inflight + 1).
+         */
+        @Deprecated
         public Builder inflightWeight(double v) {
             this.inflightWeight = v;
             return this;
@@ -135,6 +173,10 @@ public final class PeakEwmaConfig {
             return this;
         }
 
+        /**
+         * @deprecated ignored: each error window is sized to ~200 calls of its method.
+         */
+        @Deprecated
         public Builder outlierWindowMillis(long v) {
             this.outlierWindowMillis = v;
             return this;
@@ -155,6 +197,10 @@ public final class PeakEwmaConfig {
             return this;
         }
 
+        /**
+         * @deprecated ignored: staleness is two baseline half-lives of the method.
+         */
+        @Deprecated
         public Builder staleMillisForRatio(long v) {
             this.staleMillisForRatio = v;
             return this;
@@ -197,8 +243,32 @@ public final class PeakEwmaConfig {
         return merge(DEFAULTS, m);
     }
 
+    /**
+     * Statistical knobs replaced by the self-tuning model. Still accepted so existing service
+     * configs keep parsing, but ignored, with one warning per key per JVM.
+     */
+    static final java.util.Set<String> IGNORED_KEYS =
+            java.util.Set.of(
+                    PeakEwmaConfigKeys.TAU_FAST_MILLIS,
+                    PeakEwmaConfigKeys.TAU_SLOW_MILLIS,
+                    PeakEwmaConfigKeys.INFLIGHT_WEIGHT,
+                    PeakEwmaConfigKeys.OUTLIER_WINDOW_MILLIS,
+                    PeakEwmaConfigKeys.STALE_MILLIS_FOR_RATIO);
+
+    private static final java.util.Set<String> WARNED =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     public static PeakEwmaConfig merge(PeakEwmaConfig base, Map<String, Object> m) {
         if (m == null || m.isEmpty()) return base;
+        for (String k : IGNORED_KEYS) {
+            if (m.containsKey(k) && WARNED.add(k)) {
+                org.slf4j.LoggerFactory.getLogger(PeakEwmaConfig.class)
+                        .warn(
+                                "peak_ewma_p2c config key '{}' is deprecated and ignored: the"
+                                        + " balancer derives it from observed traffic",
+                                k);
+            }
+        }
         Builder b =
                 builder()
                         .tauFastMillis(

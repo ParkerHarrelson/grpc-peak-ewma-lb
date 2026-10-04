@@ -101,55 +101,68 @@ class AdversarialMathTest {
     }
 
     /**
-     * warmupMillisEff = clamp(0.5 * seedMicros * 150, 300, 3000). seedMicros is clamped to ≥ 2000,
-     * so the expression is ≥ 150 000 and always clamps to 3000 — the "adaptive" warmup is a
-     * constant (unit mismatch: micros treated as millis).
-     */
-    @Test
-    void warmupDuration_actuallyAdaptsToLatency() {
-        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(T0);
-        EwmaClocks clocks = new EwmaClocks(now::get);
-        MethodTable fast =
-                new MethodTable(PeakEwmaConfig.builder().initialRttMicros(2_000).build(), clocks);
-        MethodTable slow =
-                new MethodTable(
-                        PeakEwmaConfig.builder().initialRttMicros(2_000_000).build(), clocks);
-        assertThat(PeakEwmaTuner.warmupMillisEff(fast))
-                .as("warmup for a 2 ms service vs a 2 s service")
-                .isNotEqualTo(PeakEwmaTuner.warmupMillisEff(slow));
-    }
-
-    /** Documented knobs that are silently overridden by hard-coded clamps. */
-    @Test
-    void inflightWeight_zero_disablesInflightPenalty() {
-        PeakEwmaConfig cfg = PeakEwmaConfig.builder().inflightWeight(0.0).build();
-        assertThat(PeakEwmaTuner.inflightWeightEff(10, 1, cfg))
-                .as("inflightWeightEff when the user configured inflightWeight=0")
-                .isZero();
-    }
-
-    @Test
-    void inflightWeight_large_isHonoured() {
-        PeakEwmaConfig cfg = PeakEwmaConfig.builder().inflightWeight(1.0).build();
-        assertThat(PeakEwmaTuner.inflightWeightEff(1, 1, cfg))
-                .as("inflightWeightEff when the user configured inflightWeight=1.0")
-                .isGreaterThanOrEqualTo(1.0);
-    }
-
-    @Test
-    void tauFastMillis_isHonoured() {
-        PeakEwmaConfig cfg = PeakEwmaConfig.builder().tauFastMillis(10_000).build();
-        MethodStats ms = new MethodStats(5_000, T0);
-        assertThat(PeakEwmaTuner.tauFastMillis(ms, cfg))
-                .as("effective fast half-life when the user configured 10 s")
-                .isEqualTo(10_000);
-    }
-
-    /**
      * After an idle gap longer than the window, rotation advances at most `buckets` steps and moves
      * startNanos forward by only one window — not to now. Every subsequent call within the next
      * (gap / window) rotations wipes the entire ring again, so freshly recorded results disappear.
      */
+    /**
+     * Memory is measured in samples, not milliseconds: the same method at 2,000 rps and at 5 rps
+     * remembers a peak for the same number of samples (and never less than 2 RTTs).
+     */
+    @Test
+    void peakMemory_isMeasuredInSamples_notMilliseconds() {
+        MethodScale hot = MethodScale.of(2_000 / 10.0, 2_000); // 2 ms, 2,000 rps over 10 peers
+        MethodScale cold = MethodScale.of(5 / 10.0, 2_000); // 2 ms, 5 rps over 10 peers
+        double hotSamples = hot.tauFastMillis() / 1000.0 * (2_000 / 10.0);
+        double coldSamples =
+                Math.min(cold.tauFastMillis(), MethodScale.MAX_TAU_FAST_MILLIS)
+                        / 1000.0
+                        * (5 / 10.0);
+        assertThat(hotSamples).isCloseTo(MethodScale.PEAK_MEMORY_SAMPLES, within(0.5));
+        assertThat(coldSamples).isCloseTo(MethodScale.PEAK_MEMORY_SAMPLES, within(0.5));
+
+        MethodScale slow = MethodScale.of(1_000, 1_000_000); // 1 s latency, very high rate
+        assertThat(slow.tauFastMillis())
+                .as("never shorter than 2 RTTs")
+                .isGreaterThanOrEqualTo(2_000);
+    }
+
+    /** cost = latency x (inflight + 1): doubling the queued calls doubles the cost. */
+    @Test
+    void cost_scalesWithInflightPlusOne() {
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(T0);
+        MethodTable mt = new MethodTable(CFG, new EwmaClocks(now::get));
+        SubchannelState st = new SubchannelState();
+        st.markReady(T0);
+        MethodStats ms = mt.statsFor("m");
+        ms.update(T0 + MS, 10 * MS, CFG);
+        double w = PeakEwmaTuner.inflightWeightEff(10, 1, CFG);
+        double idle = P2CPicker.peakEwmaCost(mt, ms, st, "m", T0 + MS, w, CFG);
+        mt.incrementInflight();
+        double one = P2CPicker.peakEwmaCost(mt, ms, st, "m", T0 + MS, w, CFG);
+        mt.incrementInflight();
+        mt.incrementInflight();
+        double three = P2CPicker.peakEwmaCost(mt, ms, st, "m", T0 + MS, w, CFG);
+        assertThat(one / idle).isCloseTo(2.0, within(1e-9));
+        assertThat(three / idle).isCloseTo(4.0, within(1e-9));
+    }
+
+    /** Statistical knobs still parse (no broken service configs) but no longer change anything. */
+    @Test
+    void deprecatedStatisticalKeys_parse_butAreIgnored() {
+        PeakEwmaConfig custom =
+                PeakEwmaConfig.fromMap(
+                        java.util.Map.of(
+                                PeakEwmaConfigKeys.TAU_FAST_MILLIS,
+                                10_000,
+                                PeakEwmaConfigKeys.INFLIGHT_WEIGHT,
+                                0.0));
+        MethodStats ms = new MethodStats(5_000, T0);
+        assertThat(PeakEwmaTuner.tauFastMillis(ms, custom))
+                .isEqualTo(PeakEwmaTuner.tauFastMillis(ms, CFG));
+        assertThat(PeakEwmaTuner.inflightWeightEff(10, 1, custom)).isEqualTo(1.0);
+    }
+
     @Test
     void errorWindow_keepsResults_afterIdleGap() {
         ErrorWindow w = new ErrorWindow(10_000); // 10 x 1 s buckets

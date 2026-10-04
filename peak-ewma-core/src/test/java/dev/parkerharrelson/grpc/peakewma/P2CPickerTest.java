@@ -411,42 +411,6 @@ class P2CPickerTest {
     }
 
     @Test
-    void warmupBias_increasesCostForNewlyReadyPeer_soOlderPeerWinsTournament() {
-        String method = "svc/D";
-
-        FakeSubchannel young = new FakeSubchannel(6301);
-        FakeSubchannel old = new FakeSubchannel(6302);
-
-        MethodTable tYoung = new MethodTable(cfg, t.clocks);
-        MethodTable tOld = new MethodTable(cfg, t.clocks);
-        SubchannelState sYoung = new SubchannelState();
-        SubchannelState sOld = new SubchannelState();
-
-        sample(t, tYoung, method, cfg, 12_000);
-        sample(t, tOld, method, cfg, 12_000);
-
-        sOld.markReady(t.nowNanos() - TimeUnit.SECONDS.toNanos(60));
-        sYoung.markReady(t.nowNanos());
-
-        P2CPicker picker =
-                new P2CPicker(
-                        List.of(young, old),
-                        Map.of(young, tYoung, old, tOld),
-                        Map.of(young, sYoung, old, sOld),
-                        cfg,
-                        t.clocks,
-                        NoopLbMetrics.INSTANCE);
-
-        int oldWins = 0;
-        for (int i = 0; i < 25; i++) {
-            PickResult pr = picker.pickSubchannel(args(md(method)));
-            if (pr.getSubchannel() == old) oldWins++;
-        }
-        assertTrue(
-                oldWins >= 20, "old (warmed) peer should overwhelmingly win due to warmup penalty");
-    }
-
-    @Test
     void withTwoPeers_costsEqual_rngTiesResolvedByBetterMethodDeterministically() {
         String method = "svc/E";
         FakeSubchannel s1 = new FakeSubchannel(6401);

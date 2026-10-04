@@ -113,42 +113,20 @@ class PeakEwmaTunerTest {
     }
 
     @Test
-    void inflightWeightEff_scalesWithReadyAndMedian_andClamps() {
+    void inflightWeightEff_isTheStandardInflightPlusOneTerm() {
         PeakEwmaConfig c = cfg();
-        double hi = PeakEwmaTuner.inflightWeightEff(200, 1, c);
-        assertEquals(0.30, hi, 1e-9);
-
-        double lo = PeakEwmaTuner.inflightWeightEff(1, 10_000, c);
-        assertEquals(0.05, lo, 1e-9);
-
-        double mid = PeakEwmaTuner.inflightWeightEff(10, 5, c);
-        assertTrue(mid >= 0.05 && mid <= 0.30);
-    }
-
-    @Test
-    void warmupMillisEff_dependsOnSeededInitialMicros_andClamps() {
-        PeakEwmaConfig c = cfg();
-        EwmaClocks clocks = new EwmaClocks(() -> 42L);
-        MethodTable table = new MethodTable(c, clocks);
-
-        long warm1 = PeakEwmaTuner.warmupMillisEff(table);
-        assertTrue(warm1 >= 300 && warm1 <= 3000);
-
-        table.statsFor("svc/A").update(1000L, 3_000L * 1_000L, c);
-        long warm2 = PeakEwmaTuner.warmupMillisEff(table);
-        assertTrue(warm2 >= 300 && warm2 <= 3000);
+        assertEquals(1.0, PeakEwmaTuner.inflightWeightEff(200, 1, c), 1e-12);
+        assertEquals(1.0, PeakEwmaTuner.inflightWeightEff(1, 10_000, c), 1e-12);
     }
 
     @Test
     void windowMillisEff_targetsSampleCount_andClamps() {
-        long big = PeakEwmaTuner.windowMillisEff(0.01, 0.01);
-        assertEquals(45_000L, big);
-
-        long small = PeakEwmaTuner.windowMillisEff(5000, 5000);
-        assertEquals(8_000L, small);
-
-        long mid = PeakEwmaTuner.windowMillisEff(5.0, 10.0);
-        assertTrue(mid > 8_000 && mid < 45_000, "mid=" + mid);
+        // ~200 calls: 5/s -> 40 s.
+        assertEquals(40_000L, PeakEwmaTuner.windowMillisEff(5.0, 5.0, 1_000));
+        // Never shorter than two ticks, however hot the method.
+        assertEquals(2_000L, PeakEwmaTuner.windowMillisEff(5_000, 5_000, 1_000));
+        // At most 5 minutes, however cold.
+        assertEquals(300_000L, PeakEwmaTuner.windowMillisEff(0.01, 0.01, 1_000));
     }
 
     @Test

@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class MethodTable {
     private static final long MIN_SEED_MICROS = 2_000L;
+    // Starting size only: the outlier tick resizes each window to ~200 calls of its method.
+    private static final long INITIAL_ERROR_WINDOW_MILLIS = 15_000L;
 
     private final ConcurrentHashMap<String, MethodStats> methods = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ErrorWindow> methodWindows = new ConcurrentHashMap<>();
@@ -35,11 +37,33 @@ public final class MethodTable {
     private final EwmaClocks clocks;
 
     private volatile long cachedSeedMicros;
+    private final ConcurrentHashMap<String, MethodScale> fleetScales;
 
     public MethodTable(PeakEwmaConfig peakEwmaConfig, EwmaClocks clocks) {
+        this(peakEwmaConfig, clocks, new ConcurrentHashMap<>());
+    }
+
+    /**
+     * @param fleetScales per-method view of the whole fleet, shared by every backend's table and
+     *     maintained by the outlier tick; supplies half-lives and the seed for new methods
+     */
+    MethodTable(
+            PeakEwmaConfig peakEwmaConfig,
+            EwmaClocks clocks,
+            ConcurrentHashMap<String, MethodScale> fleetScales) {
         this.peakEwmaConfig = peakEwmaConfig;
         this.clocks = clocks;
+        this.fleetScales = fleetScales;
         this.cachedSeedMicros = Math.max(MIN_SEED_MICROS, peakEwmaConfig.initialRttMicros);
+    }
+
+    /**
+     * Prior latency for a method this backend hasn't served: the fleet median for the method if
+     * known, else this backend's typical latency across methods, else {@code initialRttMicros}.
+     */
+    double seedMicros(String method) {
+        MethodScale sc = fleetScales.get(method);
+        return (sc != null && !Double.isNaN(sc.seedMicros())) ? sc.seedMicros() : cachedSeedMicros;
     }
 
     /**
@@ -48,7 +72,13 @@ public final class MethodTable {
      */
     public MethodStats statsFor(String method) {
         return methods.computeIfAbsent(
-                method, k -> new MethodStats(cachedSeedMicros, clocks.nanoTime()));
+                method,
+                k -> {
+                    MethodStats ms = new MethodStats((long) seedMicros(k), clocks.nanoTime());
+                    MethodScale sc = fleetScales.get(k);
+                    if (sc != null) ms.setScale(sc);
+                    return ms;
+                });
     }
 
     /**
@@ -64,7 +94,7 @@ public final class MethodTable {
      */
     public ErrorWindow windowFor(String method) {
         return methodWindows.computeIfAbsent(
-                method, k -> new ErrorWindow(peakEwmaConfig.outlierWindowMillis));
+                method, k -> new ErrorWindow(INITIAL_ERROR_WINDOW_MILLIS));
     }
 
     /** Marks {@code method} as ejected until the given nano-timestamp. */
