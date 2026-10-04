@@ -35,7 +35,23 @@ final class PeakEwmaTuner {
         return std / mean;
     }
 
+    /** Prototype knob: how many fair-share samples a peak should be remembered for. */
+    static volatile double PEAK_MEMORY_SAMPLES =
+            Double.parseDouble(System.getProperty("peakewma.peakMemorySamples", "NaN"));
+
+    /**
+     * Scale-free fast half-life: remember a peak for ~K samples of a fair share of this method's
+     * traffic, and never for less than 2 RTTs. Returns NaN when disabled or rate unknown.
+     */
+    static double sampleBasedTauFastMillis(double fairSharePerSec, double rttMillis) {
+        double k = PEAK_MEMORY_SAMPLES;
+        if (Double.isNaN(k) || fairSharePerSec <= 0) return Double.NaN;
+        return clamp(Math.max(1000.0 * k / fairSharePerSec, 2.0 * rttMillis), 20.0, 300_000.0);
+    }
+
     static long tauFastMillis(MethodStats ms, PeakEwmaConfig cfg) {
+        double adaptive = ms.adaptiveTauFastMillis();
+        if (!Double.isNaN(adaptive)) return Math.max(1L, (long) adaptive);
         double cv = coeffVarFromEwma(ms);
         // Adapt around the CONFIGURED half-life (clamps are relative to it); with the default
         // 1000 ms this is the same [300, 2000] ms range as before.

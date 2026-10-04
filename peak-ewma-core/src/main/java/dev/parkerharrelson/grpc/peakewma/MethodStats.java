@@ -27,6 +27,9 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class MethodStats {
 
     private volatile long lastUpdateNanos;
+    // Fast (peak) half-life chosen by the outlier tick from this method's fleet-wide request
+    // rate and latency; NaN until the first tick has seen traffic (then the config default).
+    private volatile double adaptiveTauFastMillis = Double.NaN;
     private volatile double ewmaFastMicros;
     private volatile double ewmaSlowMicros;
 
@@ -157,6 +160,14 @@ public final class MethodStats {
         } finally {
             varLock.unlock();
         }
+    }
+
+    void setAdaptiveTauFastMillis(double millis) {
+        this.adaptiveTauFastMillis = millis;
+    }
+
+    double adaptiveTauFastMillis() {
+        return adaptiveTauFastMillis;
     }
 
     /**

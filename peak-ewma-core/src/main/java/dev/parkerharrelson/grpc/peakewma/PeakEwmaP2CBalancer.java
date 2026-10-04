@@ -301,6 +301,12 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 // median (with 2 there is no telling which one is the outlier).
                 double medianSlow = warmSlow.size() >= 3 ? median(warmSlow) : Double.NaN;
                 double fleetRate = rateSum / n;
+                double tauSamples =
+                        PeakEwmaTuner.sampleBasedTauFastMillis(
+                                fleetRate, Double.isNaN(medianSlow) ? 0 : medianSlow / 1000.0);
+                if (!Double.isNaN(tauSamples)) {
+                    for (PeerMethod pm : peers) pm.stats.setAdaptiveTauFastMillis(tauSamples);
+                }
 
                 for (PeerMethod pm : peers) {
                     long winMsEff = PeakEwmaTuner.windowMillisEff(pm.rate, fleetRate);
