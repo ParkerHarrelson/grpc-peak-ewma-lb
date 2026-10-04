@@ -7,7 +7,6 @@ import static org.assertj.core.api.Assertions.within;
 
 import dev.parkerharrelson.grpc.peakewma.outlier.ErrorWindow;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /** Numerical / formula bugs in the EWMA, tuner and error window. */
@@ -192,13 +191,14 @@ class AdversarialMathTest {
      * small services — no backend can ever be ejected, no matter how broken.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void oneBackend_canBeEjected_inSmallFleets() {
         for (int n = 2; n <= 4; n++) {
-            int pct = (int) Math.round(100.0 / n);
-            assertThat(pct)
-                    .as("ejecting 1 of %d backends (%d%%) vs maxEjectionPercentEff", n, pct)
-                    .isLessThanOrEqualTo(PeakEwmaTuner.maxEjectionPercentEff(n));
+            assertThat(PeakEwmaTuner.maxEjectedCountEff(n))
+                    .as("max ejected peers with %d backends", n)
+                    .isGreaterThanOrEqualTo(1);
+            assertThat(n - 1)
+                    .as("peers left after ejecting one of %d vs min-ready", n)
+                    .isGreaterThanOrEqualTo(PeakEwmaTuner.minReadyAfterEjectEff(n));
         }
     }
 }

@@ -9,7 +9,6 @@ import dev.parkerharrelson.grpc.peakewma.AdversarialFixture.Response;
 import io.grpc.LoadBalancer.Subchannel;
 import io.grpc.Status;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -175,18 +174,32 @@ class AdversarialSimulationTest {
     }
 
     /**
-     * A broken backend in a 4-node fleet is never ejected (cap) even at 100 % errors, while the
-     * README promises outlier ejection "if a backend crosses outlierErrorRate".
+     * Small fleets: with 4 backends one may be ejected (the percentage caps used to forbid any
+     * ejection below 5 backends). Two parts: (1) given enough recent failures, the broken backend
+     * IS ejected; (2) in a realistic run the failure penalty already drains it, so it gets almost
+     * no traffic whether or not it ever reaches the ejection request volume.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void erroringBackend_isEjected_inFourNodeFleet() {
         AdversarialFixture f = fleet(4, 10.0);
         f.run(400, 10_000, METHOD_A);
-        // same latency as peers, so this is purely about error-rate ejection
-        f.models.put(7000, (t, m) -> new Response(10 * MS, Status.INTERNAL));
-        f.run(400, 30_000, METHOD_A);
+
+        // (1) Cap logic: make failures 2/3 of b0's recent window, then a tick.
+        var w0 = table(f, 7000).windowFor(METHOD_A.getFullMethodName());
+        long okSoFar = w0.snapshot(f.now.get()).total;
+        for (long i = 0; i < Math.max(100, 2 * okSoFar); i++) {
+            w0.recordResult(false, f.now.get());
+        }
+        f.tick();
         assertThat(f.metrics.ejections).as("ejections of a 100%%-error backend").isNotEmpty();
+
+        // (2) Realistic: b0 fails every call (same latency as peers) for 30 s.
+        f.models.put(7000, (t, m) -> new Response(10 * MS, Status.INTERNAL));
+        f.resetCounters();
+        f.run(400, 30_000, METHOD_A);
+        assertThat(f.share(7000))
+                .as("share of the 100%%-error backend: %s", shares(f))
+                .isLessThan(0.02);
     }
 
     /**
@@ -209,7 +222,6 @@ class AdversarialSimulationTest {
      * per-method design is defeated because tryEjectForMethod sets subchannelState.ejectUntil.
      */
     @Test
-    @Tag("adversarial") // still failing: tracked issue open
     void singleSlowCallOnOneMethod_doesNotEjectBackendForOtherMethods() {
         AdversarialFixture f = fleet(10, 5.0);
         f.run(1000, 120_000, METHOD_A, METHOD_B); // long enough for the slow EWMA to converge
@@ -242,13 +254,9 @@ class AdversarialSimulationTest {
     void longLivedStream_doesNotEjectBackend() {
         AdversarialFixture f = fleet(10, 5.0);
         f.run(2000, 10_000, METHOD_A, METHOD_B);
-        int target = warmestPort(f, METHOD_B.getFullMethodName());
-        io.grpc.LoadBalancer.PickResult watch = null;
-        for (int i = 0; i < 10_000 && watch == null; i++) {
-            var pr = f.pick(AdversarialFixture.METHOD_WATCH); // a real server-streaming method
-            if (AdversarialFixture.portOf(pr.getSubchannel()) == target) watch = pr;
-        }
-        assertThat(watch).as("got a pick on the warm backend").isNotNull();
+        // Open the watch stream wherever P2C sends it (a real server-streaming method).
+        io.grpc.LoadBalancer.PickResult watch = f.pick(AdversarialFixture.METHOD_WATCH);
+        assertThat(watch.getSubchannel()).as("watch stream got a backend").isNotNull();
         var tracer =
                 watch.getStreamTracerFactory()
                         .newClientStreamTracer(

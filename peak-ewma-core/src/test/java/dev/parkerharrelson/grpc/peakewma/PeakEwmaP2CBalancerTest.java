@@ -641,7 +641,7 @@ class PeakEwmaP2CBalancerTest {
     }
 
     @Test
-    void adaptiveGate_warmAndFresh_true_and_stale_false() throws Exception {
+    void isWarm_warmAndFresh_true_and_stale_false() throws Exception {
         PeakEwmaConfig cfg = PeakEwmaConfig.builder().staleMillisForRatio(5_000).build();
 
         long now = System.nanoTime();
@@ -662,10 +662,10 @@ class PeakEwmaP2CBalancerTest {
         boolean gateTrue =
                 invokePrivateStaticMethod(
                         new Class<?>[] {
-                            MethodStats.class, ErrorWindow.class, long.class, PeakEwmaConfig.class
+                            MethodStats.class, double.class, long.class, PeakEwmaConfig.class
                         },
                         warmFresh,
-                        ew,
+                        PeakEwmaTuner.methodRatePerSec(ew, now),
                         now,
                         cfg);
         assertTrue(gateTrue, "expected adaptiveGate true for warm+fresh stats");
@@ -680,10 +680,10 @@ class PeakEwmaP2CBalancerTest {
         boolean gateFalse =
                 invokePrivateStaticMethod(
                         new Class<?>[] {
-                            MethodStats.class, ErrorWindow.class, long.class, PeakEwmaConfig.class
+                            MethodStats.class, double.class, long.class, PeakEwmaConfig.class
                         },
                         staleStats,
-                        ew,
+                        PeakEwmaTuner.methodRatePerSec(ew, now),
                         now,
                         cfg);
         assertFalse(gateFalse, "expected adaptiveGate false when stats are stale");
@@ -771,7 +771,7 @@ class PeakEwmaP2CBalancerTest {
     @SuppressWarnings("unchecked")
     private static <T> T invokePrivateStaticMethod(Class<?>[] paramTypes, Object... args)
             throws Exception {
-        Method m = PeakEwmaP2CBalancer.class.getDeclaredMethod("adaptiveGate", paramTypes);
+        Method m = PeakEwmaP2CBalancer.class.getDeclaredMethod("isWarm", paramTypes);
         m.setAccessible(true);
         return (T) m.invoke(null, args);
     }

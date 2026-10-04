@@ -206,66 +206,157 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         }
     }
 
+    /**
+     * Outlier evaluation, once per tick on the sync context. Single pass over (peer, method): each
+     * error window is snapshotted once and aggregated per method, so the tick is O(peers x
+     * methods). (It used to compute the fleet rate for every (peer, method) by re-scanning every
+     * peer: O(peers^2 x methods), ~0.5 s per tick at 400 x 20.)
+     *
+     * <ul>
+     *   <li><b>Error rate</b> over the window ejects the whole subchannel: the backend is failing.
+     *   <li><b>Latency</b> ejects only the affected method, and compares the peer's smoothed (slow)
+     *       EWMA with the fleet median for that method. Comparing the peak EWMA against the peer's
+     *       own history ejected whole backends on a single slow call or a closing stream.
+     *   <li>At least one peer may always be ejected (as grpc's outlier_detection does), while at
+     *       least one stays in rotation; the percentage caps used to forbid any ejection with fewer
+     *       than five backends.
+     * </ul>
+     */
     private void outlierTick() {
         if (shutdown) {
             return;
         }
         try {
-            PeakEwmaConfig ewmaConfig = cfg.get();
-            if (!ewmaConfig.outlierEnabled) {
+            PeakEwmaConfig c = cfg.get();
+            if (!c.outlierEnabled) {
                 return;
             }
-
             final long now = clocks.nanoTime();
-            final long cooldownNanos =
-                    EwmaClocks.millisToNanos(ewmaConfig.outlierReentryCooldownMillis);
 
-            ReadyContext readyCtx = collectReadyContext(now);
-            if (readyCtx.readyBefore == 0) {
-                return;
-            }
-
-            int ejectedNow = readyCtx.initialEjected;
-
-            for (Map.Entry<Subchannel, MethodTable> entry : tables.entrySet()) {
-                Subchannel subchannel = entry.getKey();
-                MethodTable methodTable = entry.getValue();
-                SubchannelState subchannelState = states.get(subchannel);
-
-                if (!shouldEvaluateSubchannel(
-                        subchannel, methodTable, subchannelState, now, ewmaConfig)) {
+            List<Subchannel> ready = new ArrayList<>();
+            for (Map.Entry<Subchannel, MethodTable> e : tables.entrySet()) {
+                Subchannel sc = e.getKey();
+                if (subchannelConn.getOrDefault(sc, CONNECTING) != ConnectivityState.READY
+                        || states.get(sc) == null) {
                     continue;
                 }
+                e.getValue().pruneStale(now, c.methodPruneStaleAfterMillis, c.methodMaxEntries);
+                ready.add(sc);
+            }
+            final int n = ready.size();
+            if (n == 0) {
+                return;
+            }
 
-                if (maybeEjectMethodsForSubchannel(
-                        methodTable,
-                        subchannelState,
-                        readyCtx,
-                        now,
-                        cooldownNanos,
-                        ewmaConfig,
-                        ejectedNow)) {
-
-                    ejectedNow++;
-                }
-
-                for (String methodKey : methodTable.methodKeys()) {
-                    MethodStats ms = methodTable.statsFor(methodKey);
-                    if (ms != null) {
-                        metrics.setMethodLatencyEwma(
-                                methodKey, ms.getEwmaSlowMicros(), ms.getEwmaFastMicros());
+            // One pass: per-method view of every ready peer that has served the method.
+            Map<String, List<PeerMethod>> byMethod = new HashMap<>();
+            for (Subchannel sc : ready) {
+                MethodTable mt = tables.get(sc);
+                for (String method : mt.methodKeys()) {
+                    MethodStats ms = mt.peekStats(method);
+                    if (ms == null) {
+                        continue;
                     }
-
-                    ErrorWindow w = methodTable.windowFor(methodKey);
-                    double lambdaMethod = PeakEwmaTuner.methodRatePerSec(w, now);
-                    double lambdaFleet = fleetRateForMethod(methodKey, readyCtx.readyEntries, now);
-                    long winMsEff = PeakEwmaTuner.windowMillisEff(lambdaMethod, lambdaFleet);
-                    metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
+                    ErrorWindow w = mt.windowFor(method);
+                    ErrorWindow.Snapshot snap = w.snapshot(now);
+                    double rate = snap.total / Math.max(1e-3, w.coveredNanos(now) / 1e9);
+                    byMethod.computeIfAbsent(method, k -> new ArrayList<>())
+                            .add(
+                                    new PeerMethod(
+                                            sc, mt, ms, w, snap, rate, isWarm(ms, rate, now, c)));
                 }
             }
 
-            metrics.setReadySubchannelCount(readyCtx.readyBefore);
-            metrics.setEjectedSubchannelCount(ejectedNow);
+            final long until = now + EwmaClocks.millisToNanos(c.outlierEjectMillis);
+            final long cooldown = EwmaClocks.millisToNanos(c.outlierReentryCooldownMillis);
+            final int maxEjected = PeakEwmaTuner.maxEjectedCountEff(n);
+            final int minReady = PeakEwmaTuner.minReadyAfterEjectEff(n);
+            final int minTotal = PeakEwmaTuner.minTotalForErrorEjectEff(n);
+            int ejectedSubchannels = 0;
+            for (Subchannel sc : ready) {
+                if (states.get(sc).isEjected(now)) ejectedSubchannels++;
+            }
+
+            for (Map.Entry<String, List<PeerMethod>> e : byMethod.entrySet()) {
+                String method = e.getKey();
+                List<PeerMethod> peers = e.getValue();
+
+                double rateSum = 0;
+                long total = 0;
+                long errors = 0;
+                int methodEjected = 0;
+                List<Double> warmSlow = new ArrayList<>();
+                List<Double> warmFast = new ArrayList<>();
+                for (PeerMethod pm : peers) {
+                    rateSum += pm.rate;
+                    total += pm.snap.total;
+                    errors += pm.snap.errors;
+                    if (pm.table.isMethodEjected(method, now)) methodEjected++;
+                    if (pm.warm) {
+                        warmSlow.add(pm.stats.getEwmaSlowMicros());
+                        warmFast.add(pm.stats.getEwmaFastMicros());
+                    }
+                }
+                // Latency is judged against the fleet: needs >= 3 warm peers for a meaningful
+                // median (with 2 there is no telling which one is the outlier).
+                double medianSlow = warmSlow.size() >= 3 ? median(warmSlow) : Double.NaN;
+                double fleetRate = rateSum / n;
+
+                for (PeerMethod pm : peers) {
+                    long winMsEff = PeakEwmaTuner.windowMillisEff(pm.rate, fleetRate);
+                    pm.window.setWindowMillis(winMsEff);
+                    metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
+
+                    SubchannelState st = states.get(pm.sc);
+                    String scId = subchannelIds.getOrDefault(pm.sc, UNKNOWN);
+
+                    boolean highErr =
+                            c.outlierErrorRate > 0.0
+                                    && pm.snap.total >= minTotal
+                                    && pm.snap.errorRate >= c.outlierErrorRate;
+                    if (highErr
+                            && !st.isEjected(now)
+                            && now >= st.lastEjectEndNanos() + cooldown
+                            && ejectedSubchannels < maxEjected
+                            && n - (ejectedSubchannels + 1) >= minReady) {
+                        st.ejectUntil(until);
+                        ejectedSubchannels++;
+                        metrics.recordOutlierEjection(scId, ERRORS, pm.snap.errorRate, 1.0);
+                        continue;
+                    }
+
+                    if (!pm.warm || Double.isNaN(medianSlow) || medianSlow <= 0) {
+                        continue;
+                    }
+                    double ratio = pm.stats.getEwmaSlowMicros() / medianSlow;
+                    double multiplier =
+                            PeakEwmaTuner.latencyMultiplierEff(
+                                    PeakEwmaTuner.coeffVarFromEwma(pm.stats), c);
+                    if (ratio >= multiplier
+                            && !pm.table.isMethodEjected(method, now)
+                            && now >= pm.table.methodEjectedUntilNanos(method) + cooldown
+                            && methodEjected < maxEjected
+                            && peers.size() - (methodEjected + 1)
+                                    >= Math.min(minReady, peers.size() - 1)) {
+                        pm.table.ejectMethodUntil(method, until);
+                        methodEjected++;
+                        metrics.recordOutlierEjection(scId, LATENCY, pm.snap.errorRate, ratio);
+                        metrics.setAdaptiveTuning(LATENCY_MULTIPLIER_EFF, multiplier);
+                    }
+                }
+
+                // Fleet-level gauges, aggregated across peers (previously each peer overwrote
+                // the same method-keyed gauge and the last one iterated won).
+                metrics.setMethodRate(method, rateSum);
+                metrics.setMethodErrorRate(method, total == 0 ? 0.0 : (double) errors / total);
+                if (!warmSlow.isEmpty()) {
+                    metrics.setMethodLatencyEwma(method, median(warmSlow), median(warmFast));
+                }
+            }
+
+            metrics.setAdaptiveTuning(OUTLIER_ERROR_RATE, c.outlierErrorRate);
+            metrics.setReadySubchannelCount(n);
+            metrics.setEjectedSubchannelCount(ejectedSubchannels);
 
             publishPicker();
         } catch (Exception e) {
@@ -273,267 +364,33 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         }
     }
 
-    private ReadyContext collectReadyContext(long now) {
-        List<Map.Entry<Subchannel, MethodTable>> readyEntries = new ArrayList<>();
-        int ejectedNow = 0;
-
-        for (Map.Entry<Subchannel, MethodTable> entry : tables.entrySet()) {
-            Subchannel sc = entry.getKey();
-            MethodTable mt = entry.getValue();
-            if (mt == null) {
-                continue;
-            }
-            if (subchannelConn.getOrDefault(sc, CONNECTING) == ConnectivityState.READY) {
-                readyEntries.add(entry);
-                SubchannelState st = states.get(sc);
-                if (st != null && st.isEjected(now)) {
-                    ejectedNow++;
-                }
-            }
-        }
-
-        return new ReadyContext(readyEntries, readyEntries.size(), ejectedNow);
-    }
-
-    private boolean shouldEvaluateSubchannel(
-            Subchannel subchannel,
-            MethodTable methodTable,
-            SubchannelState subchannelState,
-            long now,
-            PeakEwmaConfig ewmaConfig) {
-
-        if (methodTable == null || subchannelState == null) {
-            return false;
-        }
-
-        methodTable.pruneStale(
-                now, ewmaConfig.methodPruneStaleAfterMillis, ewmaConfig.methodMaxEntries);
-
-        return subchannelConn.getOrDefault(subchannel, CONNECTING) == ConnectivityState.READY;
-    }
-
-    private boolean maybeEjectMethodsForSubchannel(
-            MethodTable methodTable,
-            SubchannelState subchannelState,
-            ReadyContext readyCtx,
-            long now,
-            long cooldownNanos,
-            PeakEwmaConfig ewmaConfig,
-            int ejectedSoFar) {
-
-        MethodEjectContext ctx =
-                new MethodEjectContext(
-                        readyCtx, now, cooldownNanos, ewmaConfig, ejectedSoFar, subchannelState);
-
-        for (String method : methodTable.methodKeys()) {
-            MethodStats methodStats = methodTable.statsFor(method);
-            if (methodStats == null) {
-                continue;
-            }
-
-            if (tryEjectForMethod(method, methodStats, methodTable, ctx)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private boolean tryEjectForMethod(
-            String method,
-            MethodStats methodStats,
-            MethodTable methodTable,
-            MethodEjectContext ctx) {
-
-        long now = ctx.now();
-        PeakEwmaConfig ewmaConfig = ctx.cfg();
-        SubchannelState subchannelState = ctx.subchannelState();
-
-        ErrorWindow window = methodTable.windowFor(method);
-        double lambdaMethod = PeakEwmaTuner.methodRatePerSec(window, now);
-        double lambdaFleet = fleetRateForMethod(method, ctx.readyCtx().readyEntries(), now);
-
-        long winMsEff = PeakEwmaTuner.windowMillisEff(lambdaMethod, lambdaFleet);
-        window.setWindowMillis(winMsEff);
-
-        ErrorWindow.Snapshot snapshot = window.snapshot(now);
-        if (snapshot.total == 0L) {
-            metrics.setMethodRate(method, lambdaMethod);
-            metrics.setMethodErrorRate(method, snapshot.errorRate);
-            metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
-            return false;
-        }
-
-        metrics.setMethodRate(method, lambdaMethod);
-        metrics.setMethodErrorRate(method, snapshot.errorRate);
-        metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
-
-        EjectionDecision decision =
-                evaluateEjectionDecision(
-                        methodStats,
-                        window,
-                        snapshot,
-                        new EjectionContext(
-                                ctx.readyCtx().readyBefore(),
-                                ctx.ejectedSoFar(),
-                                subchannelState,
-                                now,
-                                ctx.cooldownNanos(),
-                                ewmaConfig));
-
-        if (!decision.shouldEject) {
-            return false;
-        }
-
-        long until = now + EwmaClocks.millisToNanos(ewmaConfig.outlierEjectMillis);
-
-        methodTable.ejectMethodUntil(method, until);
-
-        boolean wasEjected = subchannelState.isEjected(now);
-        subchannelState.ejectUntil(until);
-
-        String scIdForMetrics = subchannelIdForState(subchannelState);
-
-        double fast = Math.max(1e-6, methodStats.getEwmaFastMicros());
-        double slow = Math.max(1e-6, methodStats.getEwmaSlowMicros());
-        double coeffVar = PeakEwmaTuner.coeffVarFromEwma(methodStats);
-        double latencyMultiplierEff = PeakEwmaTuner.latencyMultiplierEff(coeffVar, ewmaConfig);
-
-        boolean gate = adaptiveGate(methodStats, window, now, ewmaConfig);
-        double latencyRatio = gate ? (fast / slow) : 1.0;
-
-        boolean highErr =
-                (ewmaConfig.outlierErrorRate > 0.0
-                        && snapshot.errorRate >= ewmaConfig.outlierErrorRate);
-        boolean highLat = (latencyMultiplierEff > 1.0 && latencyRatio >= latencyMultiplierEff);
-
-        String reason = buildOutlierReason(highErr, highLat);
-
-        metrics.recordOutlierEjection(scIdForMetrics, reason, snapshot.errorRate, latencyRatio);
-
-        metrics.setAdaptiveTuning(LATENCY_MULTIPLIER_EFF, latencyMultiplierEff);
-        metrics.setAdaptiveTuning(OUTLIER_ERROR_RATE, ewmaConfig.outlierErrorRate);
-
-        return !wasEjected;
-    }
-
-    private EjectionDecision evaluateEjectionDecision(
-            MethodStats methodStats,
+    /** One ready peer's view of one method, captured once per tick. */
+    private record PeerMethod(
+            Subchannel sc,
+            MethodTable table,
+            MethodStats stats,
             ErrorWindow window,
-            ErrorWindow.Snapshot snapshot,
-            EjectionContext ctx) {
+            ErrorWindow.Snapshot snap,
+            double rate,
+            boolean warm) {}
 
-        boolean gate = adaptiveGate(methodStats, window, ctx.now(), ctx.cfg());
-
-        double coeffVarFromEwma = PeakEwmaTuner.coeffVarFromEwma(methodStats);
-        double latencyMultiplierEff =
-                PeakEwmaTuner.latencyMultiplierEff(coeffVarFromEwma, ctx.cfg());
-
-        int maxPctEff = PeakEwmaTuner.maxEjectionPercentEff(ctx.readyBefore());
-        double minReadyFracEff = PeakEwmaTuner.minReadyFractionAfterEjectEff(ctx.readyBefore());
-        int minTotalEff = PeakEwmaTuner.minTotalForErrorEjectEff(ctx.readyBefore());
-
-        if (snapshot.total < minTotalEff) {
-            return new EjectionDecision(false);
-        }
-
-        double errorRate = snapshot.errorRate;
-        double fast = Math.max(1e-6, methodStats.getEwmaFastMicros());
-        double slow = Math.max(1e-6, methodStats.getEwmaSlowMicros());
-        double latencyRatio = gate ? (fast / slow) : 1.0;
-
-        boolean ejectOnErr =
-                (ctx.cfg().outlierErrorRate > 0.0 && errorRate >= ctx.cfg().outlierErrorRate);
-        boolean ejectOnLat = (latencyMultiplierEff > 1.0 && latencyRatio >= latencyMultiplierEff);
-
-        if (!(ejectOnErr || ejectOnLat)) {
-            return new EjectionDecision(false);
-        }
-
-        if (ctx.cfg().outlierReentryCooldownMillis > 0) {
-            long nextAllowed = ctx.subchannelState().lastEjectEndNanos() + ctx.cooldownNanos();
-            if (ctx.now() < nextAllowed) {
-                return new EjectionDecision(false);
-            }
-        }
-
-        int wouldBeEjectedGlobal =
-                ctx.ejectedSoFar() + (ctx.subchannelState().isEjected(ctx.now()) ? 0 : 1);
-
-        int percent = (int) Math.round(100.0 * wouldBeEjectedGlobal / ctx.readyBefore());
-        if (percent > maxPctEff) {
-            return new EjectionDecision(false);
-        }
-
-        int minReady = (int) Math.ceil(minReadyFracEff * ctx.readyBefore());
-        if ((ctx.readyBefore() - wouldBeEjectedGlobal) < minReady) {
-            return new EjectionDecision(false);
-        }
-
-        return new EjectionDecision(true);
-    }
-
-    private record EjectionDecision(boolean shouldEject) {}
-
-    private record EjectionContext(
-            int readyBefore,
-            int ejectedSoFar,
-            SubchannelState subchannelState,
-            long now,
-            long cooldownNanos,
-            PeakEwmaConfig cfg) {}
-
-    private record MethodEjectContext(
-            ReadyContext readyCtx,
-            long now,
-            long cooldownNanos,
-            PeakEwmaConfig cfg,
-            int ejectedSoFar,
-            SubchannelState subchannelState) {}
-
-    private String buildOutlierReason(boolean highErr, boolean highLat) {
-        if (highErr && highLat) {
-            return ERRORS + "+" + LATENCY;
-        } else if (highErr) {
-            return ERRORS;
-        } else {
-            return LATENCY;
-        }
-    }
-
-    private static boolean adaptiveGate(
-            MethodStats methodStats,
-            ErrorWindow errorWindow,
-            long now,
-            PeakEwmaConfig peakEwmaConfig) {
-        double lambda = PeakEwmaTuner.methodRatePerSec(errorWindow, now);
-        int minSamples = PeakEwmaTuner.minSamplesForRatioEff(lambda);
-        long minWarmMs = PeakEwmaTuner.minWarmupMillisForRatioEff(lambda);
-
-        int numSamples = methodStats.getSamples();
-        long first = methodStats.getFirstSampleNanos();
+    /** Enough recent samples, over enough time, to trust this peer's EWMAs. */
+    private static boolean isWarm(MethodStats ms, double ratePerSec, long now, PeakEwmaConfig c) {
+        int minSamples = PeakEwmaTuner.minSamplesForRatioEff(ratePerSec);
+        long minWarmMs = PeakEwmaTuner.minWarmupMillisForRatioEff(ratePerSec);
+        long first = ms.getFirstSampleNanos();
         long sinceFirst = (first == 0L) ? 0L : Math.max(0L, now - first);
-        long sinceLast = Math.max(0L, now - methodStats.getLastUpdateNanos());
-
-        boolean warm =
-                numSamples >= minSamples && sinceFirst >= EwmaClocks.millisToNanos(minWarmMs);
-        boolean stale = sinceLast >= EwmaClocks.millisToNanos(peakEwmaConfig.staleMillisForRatio);
-        return warm && !stale;
+        long sinceLast = Math.max(0L, now - ms.getLastUpdateNanos());
+        return ms.getSamples() >= minSamples
+                && sinceFirst >= EwmaClocks.millisToNanos(minWarmMs)
+                && sinceLast < EwmaClocks.millisToNanos(c.staleMillisForRatio);
     }
 
-    private double fleetRateForMethod(
-            String method, List<Map.Entry<Subchannel, MethodTable>> readyEntries, long now) {
-
-        double lambdaFleet = 0.0;
-        for (Map.Entry<Subchannel, MethodTable> rEntry : readyEntries) {
-            MethodTable rmt = rEntry.getValue();
-            if (rmt == null) {
-                continue;
-            }
-            lambdaFleet += PeakEwmaTuner.methodRatePerSec(rmt.windowFor(method), now);
-        }
-        int readyCount = readyEntries.size();
-        return readyCount == 0 ? 0.0 : (lambdaFleet / readyCount);
+    private static double median(List<Double> values) {
+        List<Double> v = new ArrayList<>(values);
+        v.sort(Double::compareTo);
+        int k = v.size();
+        return (k & 1) == 1 ? v.get(k / 2) : 0.5 * (v.get(k / 2 - 1) + v.get(k / 2));
     }
 
     private void publishPicker() {
@@ -758,15 +615,6 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         return inetHostPort(eag).orElse("sc-" + idSeq.getAndIncrement());
     }
 
-    private String subchannelIdForState(SubchannelState targetState) {
-        for (Map.Entry<Subchannel, SubchannelState> e : states.entrySet()) {
-            if (e.getValue() == targetState) {
-                return subchannelIds.getOrDefault(e.getKey(), UNKNOWN);
-            }
-        }
-        return UNKNOWN;
-    }
-
     private final class ScListener implements SubchannelStateListener {
         private final Subchannel subchannel;
 
@@ -861,9 +709,4 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             }
         };
     }
-
-    private record ReadyContext(
-            List<Map.Entry<Subchannel, MethodTable>> readyEntries,
-            int readyBefore,
-            int initialEjected) {}
 }

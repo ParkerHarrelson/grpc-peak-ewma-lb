@@ -96,6 +96,23 @@ final class PeakEwmaTuner {
         return clamp(v, 10, 50);
     }
 
+    /**
+     * Maximum peers that may be ejected at once: the percentage cap, but never less than one.
+     * Without the floor, 1 of n exceeds the cap for every n < 5, so small fleets could never eject
+     * anything (grpc's outlier_detection likewise always allows the first ejection).
+     */
+    static int maxEjectedCountEff(int readyCount) {
+        if (readyCount < 2) return 0;
+        return Math.max(
+                1, (int) Math.floor(readyCount * maxEjectionPercentEff(readyCount) / 100.0));
+    }
+
+    /** Peers that must stay in rotation after an ejection; never more than readyCount - 1. */
+    static int minReadyAfterEjectEff(int readyCount) {
+        int v = (int) Math.ceil(minReadyFractionAfterEjectEff(readyCount) * readyCount);
+        return Math.min(v, Math.max(1, readyCount - 1));
+    }
+
     static double minReadyFractionAfterEjectEff(int readyCount) {
         double v = 0.7 - 0.05 * log2(Math.max(1.0, readyCount));
         return clamp(v, 0.4, 0.7);
