@@ -4,7 +4,6 @@ import static dev.parkerharrelson.grpc.peakewma.LBConstants.*;
 import static java.util.Arrays.sort;
 
 import dev.parkerharrelson.grpc.peakewma.metrics.LbMetrics;
-import dev.parkerharrelson.grpc.peakewma.tracing.EwmaClientStreamTracerFactory;
 import io.grpc.LoadBalancer;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.SubchannelPicker;
@@ -25,6 +24,8 @@ public final class P2CPicker extends SubchannelPicker {
     private static final int MAX_RESAMPLES = 8;
 
     private final List<LoadBalancer.Subchannel> readyPool;
+    private final MethodTable[] tableAt;
+    private final SubchannelState[] stateAt;
     private final Map<LoadBalancer.Subchannel, MethodTable> tables;
     private final Map<LoadBalancer.Subchannel, SubchannelState> states;
     private final PeakEwmaConfig ewmaConfig;
@@ -60,6 +61,14 @@ public final class P2CPicker extends SubchannelPicker {
             LbMetrics metrics,
             double inflightWeightEff) {
         this.readyPool = Objects.requireNonNull(readyPool, "readyPool");
+        // Resolve each peer's state once per picker (a picker lives until the ready set changes)
+        // instead of two map lookups per scored peer on every pick.
+        this.tableAt = new MethodTable[readyPool.size()];
+        this.stateAt = new SubchannelState[readyPool.size()];
+        for (int i = 0; i < readyPool.size(); i++) {
+            tableAt[i] = tables.get(readyPool.get(i));
+            stateAt[i] = states.get(readyPool.get(i));
+        }
         this.tables = Objects.requireNonNull(tables, "tables");
         this.states = Objects.requireNonNull(states, "states");
         this.ewmaConfig = Objects.requireNonNull(ewmaConfig, "cfg");
@@ -134,17 +143,17 @@ public final class P2CPicker extends SubchannelPicker {
             int i1 = rnd.nextInt(n);
             int i2 = rnd.nextInt(n - 1);
             if (i2 >= i1) i2++;
-            double ca = cost(readyPool.get(i1), method, now);
-            double cb = cost(readyPool.get(i2), method, now);
+            double ca = costAt(i1, method, now);
+            double cb = costAt(i2, method, now);
             for (int attempt = 0;
                     attempt < MAX_RESAMPLES && (Double.isInfinite(ca) || Double.isInfinite(cb));
                     attempt++) {
                 if (Double.isInfinite(ca)) {
                     i1 = otherIndex(rnd, n, i2);
-                    ca = cost(readyPool.get(i1), method, now);
+                    ca = costAt(i1, method, now);
                 } else {
                     i2 = otherIndex(rnd, n, i1);
-                    cb = cost(readyPool.get(i2), method, now);
+                    cb = costAt(i2, method, now);
                 }
             }
             if (!Double.isInfinite(ca) && !Double.isInfinite(cb)) {
@@ -230,14 +239,10 @@ public final class P2CPicker extends SubchannelPicker {
             return PickResult.withNoResult();
         }
 
-        Runnable inc = methodTable::incrementInflight;
-        Runnable dec = methodTable::decrementInflight;
-
-        EwmaClientStreamTracerFactory tracerFactory =
-                new EwmaClientStreamTracerFactory(
-                        methodTable, ewmaConfig, clocks, method, inc, dec, metrics, recordLatency);
-
-        return PickResult.withSubchannel(sc, tracerFactory);
+        // Cached per (backend, method): the factory is immutable, so allocating one (plus two
+        // lambdas) on every pick was pure garbage.
+        return PickResult.withSubchannel(
+                sc, methodTable.tracerFactory(method, recordLatency, ewmaConfig, clocks, metrics));
     }
 
     private LoadBalancer.Subchannel pickBestByBaseline(String method) {
@@ -273,6 +278,16 @@ public final class P2CPicker extends SubchannelPicker {
         double score = Math.max(EPS, ms != null ? ms.getEwmaFastMicros() : mt.cachedSeedMicros());
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
         return score * busy;
+    }
+
+    /** Fast-path cost of the peer at {@code i}, using the per-picker resolved state. */
+    private double costAt(int i, String method, long now) {
+        MethodTable mt = tableAt[i];
+        SubchannelState st = stateAt[i];
+        if (mt == null || st == null || st.isRemoved()) return Double.POSITIVE_INFINITY;
+        if (st.isEjected(now) || mt.isMethodEjected(method, now)) return Double.POSITIVE_INFINITY;
+        return peakEwmaCost(
+                mt, mt.peekStats(method), st, method, now, inflightWeightEff, ewmaConfig);
     }
 
     private double cost(LoadBalancer.Subchannel subchannel, String method, long now) {

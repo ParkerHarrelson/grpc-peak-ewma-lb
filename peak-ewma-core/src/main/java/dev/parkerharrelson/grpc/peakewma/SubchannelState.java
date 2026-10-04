@@ -20,6 +20,16 @@ public final class SubchannelState {
     private volatile long ejectedUntilNanos = 0L;
     private final AtomicLong lastEjectEndNanos = new AtomicLong(0L);
     private final EjectionBackoff backoff = new EjectionBackoff();
+    private volatile boolean removed;
+
+    /** The balancer dropped this backend; pickers built before that must stop choosing it. */
+    void markRemoved() {
+        removed = true;
+    }
+
+    boolean isRemoved() {
+        return removed;
+    }
 
     /** Ejection backoff for this backend (outlier tick only). */
     EjectionBackoff backoff() {

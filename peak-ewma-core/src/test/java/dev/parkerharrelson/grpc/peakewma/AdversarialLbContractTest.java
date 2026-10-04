@@ -215,4 +215,43 @@ class AdversarialLbContractTest {
                 .as("times the outlier ticker was cancelled + rescheduled by no-op updates")
                 .isZero();
     }
+
+    /**
+     * Endpoints are keyed by all their addresses (dual-stack endpoints sharing a first address are
+     * distinct), and an attribute change updates the existing subchannel in place.
+     */
+    @Test
+    void addressKeying_usesAllAddresses_andAttributeChangesUpdateSubchannel() {
+        AdversarialFixture f = new AdversarialFixture(CFG);
+        var v4 = new java.net.InetSocketAddress("127.0.0.1", 9301);
+        var a =
+                new io.grpc.EquivalentAddressGroup(
+                        java.util.List.of(v4, new java.net.InetSocketAddress("::1", 9301)));
+        var b =
+                new io.grpc.EquivalentAddressGroup(
+                        java.util.List.of(v4, new java.net.InetSocketAddress("::1", 9302)));
+        f.helper.syncCtx.execute(
+                () ->
+                        f.balancer.handleResolvedAddresses(
+                                io.grpc.LoadBalancer.ResolvedAddresses.newBuilder()
+                                        .setAddresses(java.util.List.of(a, b))
+                                        .build()));
+        Map<?, ?> keys = (Map<?, ?>) AdversarialFixture.getField(f.balancer, "keyToSubchannel");
+        assertThat(keys).as("two endpoints sharing a first address").hasSize(2);
+
+        var zone = io.grpc.Attributes.Key.<String>create("zone");
+        var a2 =
+                new io.grpc.EquivalentAddressGroup(
+                        a.getAddresses(), io.grpc.Attributes.newBuilder().set(zone, "z2").build());
+        f.helper.syncCtx.execute(
+                () ->
+                        f.balancer.handleResolvedAddresses(
+                                io.grpc.LoadBalancer.ResolvedAddresses.newBuilder()
+                                        .setAddresses(java.util.List.of(a2, b))
+                                        .build()));
+        assertThat(keys).as("attribute change keeps the same subchannels").hasSize(2);
+        long updated =
+                keys.values().stream().filter(sc -> ((FakeSubchannel) sc).eag.equals(a2)).count();
+        assertThat(updated).as("subchannel received the updated EAG").isEqualTo(1);
+    }
 }

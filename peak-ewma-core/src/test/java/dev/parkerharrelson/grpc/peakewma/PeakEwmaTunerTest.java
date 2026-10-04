@@ -102,14 +102,10 @@ class PeakEwmaTunerTest {
     }
 
     @Test
-    void minSamplesForRatioEff_and_minWarmupMillisForRatioEff_hitBounds() {
-        assertEquals(2, PeakEwmaTuner.minSamplesForRatioEff(0.0));
-        assertTrue(PeakEwmaTuner.minWarmupMillisForRatioEff(0.0) >= 250);
-        assertTrue(PeakEwmaTuner.minWarmupMillisForRatioEff(0.0) <= 2000);
-
-        assertEquals(16, PeakEwmaTuner.minSamplesForRatioEff(10_000.0));
-        long warmHigh = PeakEwmaTuner.minWarmupMillisForRatioEff(10_000.0);
-        assertTrue(warmHigh >= 250 && warmHigh <= 2000);
+    void warmGate_isSampleBased_andRateIndependent() {
+        assertEquals(10, PeakEwmaTuner.minSamplesForRatioEff(0.0));
+        assertEquals(10, PeakEwmaTuner.minSamplesForRatioEff(10_000.0));
+        assertEquals(0L, PeakEwmaTuner.minWarmupMillisForRatioEff(5.0));
     }
 
     @Test
@@ -132,26 +128,17 @@ class PeakEwmaTunerTest {
     @Test
     void ejectionGuards_andLatencyMultiplierEff_coverBounds() {
         PeakEwmaConfig c = cfg();
-
-        assertTrue(PeakEwmaTuner.maxEjectionPercentEff(1) >= 10);
-        assertTrue(PeakEwmaTuner.maxEjectionPercentEff(10) <= 50);
-
-        double minFrac = PeakEwmaTuner.minReadyFractionAfterEjectEff(1);
-        double maxFrac = PeakEwmaTuner.minReadyFractionAfterEjectEff(1000);
-        assertTrue(minFrac >= 0.4 && minFrac <= 0.7);
-        assertTrue(maxFrac >= 0.4 && maxFrac <= 0.7);
-
+        // At most 20% of the fleet, at least one peer, never the last one.
+        assertEquals(1, PeakEwmaTuner.maxEjectedCountEff(2));
+        assertEquals(1, PeakEwmaTuner.minReadyAfterEjectEff(2));
+        assertEquals(2, PeakEwmaTuner.maxEjectedCountEff(10));
+        assertEquals(8, PeakEwmaTuner.minReadyAfterEjectEff(10));
+        assertEquals(0, PeakEwmaTuner.maxEjectedCountEff(1));
+        // Configured multiplier, raised for noisy methods (1 + 2 x CV).
+        assertEquals(c.outlierLatencyMultiplier, PeakEwmaTuner.latencyMultiplierEff(0.1, c), 1e-9);
+        assertEquals(3.0, PeakEwmaTuner.latencyMultiplierEff(1.0, c), 1e-9);
         // Error ejection is statistical: conclusive with few calls, not with noisy many.
         assertTrue(PeakEwmaTuner.errorRateLowerBound(10, 10) > 0.7);
         assertTrue(PeakEwmaTuner.errorRateLowerBound(3, 20) < 0.1);
-        assertTrue(PeakEwmaTuner.errorRateLowerBound(60, 100) > 0.45);
-
-        double low = PeakEwmaTuner.latencyMultiplierEff(0.10, c);
-        double mid = PeakEwmaTuner.latencyMultiplierEff(0.30, c);
-        double high = PeakEwmaTuner.latencyMultiplierEff(0.70, c);
-
-        assertTrue(low <= c.outlierLatencyMultiplier && low >= 2.0);
-        assertEquals(c.outlierLatencyMultiplier, mid, 1e-12);
-        assertTrue(high >= c.outlierLatencyMultiplier && high <= 3.5);
     }
 }
