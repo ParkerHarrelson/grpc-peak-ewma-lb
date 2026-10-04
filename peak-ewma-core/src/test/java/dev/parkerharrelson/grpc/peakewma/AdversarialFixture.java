@@ -363,7 +363,7 @@ final class AdversarialFixture {
      * on them even when the balancer swallows the exception.
      */
     static final class FakeSubchannel extends Subchannel {
-        final EquivalentAddressGroup eag;
+        volatile EquivalentAddressGroup eag;
         final SynchronizationContext syncCtx;
         final AtomicInteger requestConnections = new AtomicInteger();
         final AtomicInteger syncCtxViolations = new AtomicInteger();
@@ -409,6 +409,12 @@ final class AdversarialFixture {
         @Override
         public List<EquivalentAddressGroup> getAllAddresses() {
             return List.of(eag);
+        }
+
+        @Override
+        public void updateAddresses(List<EquivalentAddressGroup> addrs) {
+            checkCtx();
+            this.eag = addrs.get(0);
         }
 
         @Override

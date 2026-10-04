@@ -62,6 +62,7 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
 
     private final Set<String> currentAddressKeys = ConcurrentHashMap.newKeySet();
     private final Map<String, Subchannel> keyToSubchannel = new ConcurrentHashMap<>();
+    private final Map<String, EquivalentAddressGroup> currentEags = new ConcurrentHashMap<>();
 
     // Guarded by outlierLock; a plain field is enough since all access goes through the lock.
     private ScheduledFuture<?> outlierTask;
@@ -592,6 +593,18 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         Set<String> toAdd = new HashSet<>(incomingKeys);
         toAdd.removeAll(currentAddressKeys);
 
+        // Same endpoint, changed EAG (attributes, e.g. locality or weights): update in place
+        // instead of ignoring it, which left existing subchannels on stale address info.
+        for (Map.Entry<String, EquivalentAddressGroup> e : keyToEag.entrySet()) {
+            Subchannel existing = keyToSubchannel.get(e.getKey());
+            EquivalentAddressGroup previous = currentEags.get(e.getKey());
+            if (existing != null && previous != null && !previous.equals(e.getValue())) {
+                existing.updateAddresses(List.of(e.getValue()));
+            }
+        }
+        currentEags.keySet().retainAll(incomingKeys);
+        currentEags.putAll(keyToEag);
+
         Set<String> toRemove = new HashSet<>(currentAddressKeys);
         toRemove.removeAll(incomingKeys);
 
@@ -706,9 +719,30 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 .execute(() -> helper.updateBalancingState(connectivityState, subchannelPicker));
     }
 
+    /**
+     * Identity of an endpoint: ALL of its addresses (dual-stack endpoints have several), not just
+     * the first, and never a hashCode (which can collide). Attributes are not part of the identity:
+     * a change there updates the existing subchannel instead of replacing it.
+     */
     private static String keyOf(EquivalentAddressGroup equivalentAddressGroup) {
-        return inetHostPort(equivalentAddressGroup)
-                .orElse(String.valueOf(equivalentAddressGroup.getAddresses().hashCode()));
+        StringBuilder key = new StringBuilder();
+        for (SocketAddress address : equivalentAddressGroup.getAddresses()) {
+            if (key.length() > 0) key.append(',');
+            key.append(
+                    address instanceof InetSocketAddress inet
+                            ? formatInet(inet)
+                            : address.getClass().getName() + ":" + address);
+        }
+        return key.toString();
+    }
+
+    private static String formatInet(InetSocketAddress inet) {
+        String host =
+                inet.getAddress() != null
+                        ? inet.getAddress().getHostAddress()
+                        : inet.getHostString();
+        if (host.indexOf(':') >= 0) host = "[" + host + "]";
+        return host + ":" + inet.getPort();
     }
 
     private static Optional<String> inetHostPort(EquivalentAddressGroup equivalentAddressGroup) {
