@@ -95,7 +95,10 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
     public void streamCreated(Attributes transportAttrs, Metadata headers) {
         startNanos = clocks.nanoTime();
         streamCreated = true;
-        onInc.run();
+        // Only unary calls count as load: a long-lived stream (watch, subscription) occupies a
+        // slot without queueing work, and latency x (inflight + 1) would make a backend holding
+        // many idle streams look many times slower for unary traffic.
+        if (recordLatency) onInc.run();
     }
 
     @Override
@@ -115,7 +118,7 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
         } catch (Exception e) {
             logger.error("EWMA stream tracer update failed on streamClosed", e);
         } finally {
-            if (streamCreated) {
+            if (streamCreated && recordLatency) {
                 onDec.run();
             }
         }

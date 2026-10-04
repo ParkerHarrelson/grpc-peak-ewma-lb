@@ -147,7 +147,7 @@ class EwmaClientStreamTracerTest {
     }
 
     @Test
-    void streamingCall_isNotALatencySample_butStillCountsInWindowAndInflight() {
+    void streamingCall_isNotALatencySample_norInflightLoad_butCountsInWindow() {
         ManualClock mc = new ManualClock(3_000_000_000L);
         EwmaClocks clocks = new EwmaClocks(mc);
         PeakEwmaConfig c = cfg();
@@ -173,7 +173,9 @@ class EwmaClientStreamTracerTest {
         assertEquals(0, ms.getSamples(), "stream lifetime must not be recorded as latency");
         assertEquals(c.initialRttMicros, ms.getEwmaFastMicros(), 1e-6);
         assertEquals(1, win.snapshot(mc.now()).total);
-        assertEquals(1, dec.get());
+        // Streams don't count as load: an idle watch stream isn't queued work, and
+        // latency x (inflight + 1) would otherwise punish backends holding many streams.
+        assertEquals(0, dec.get());
     }
 
     @Test

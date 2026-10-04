@@ -14,9 +14,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *       bursts; the outlier detector's baseline.
  * </ul>
  *
- * Both decay half-lives (configurable via {@link PeakEwmaConfig#tauFastMillis} and {@link
- * PeakEwmaConfig#tauSlowMillis}) are further adapted by {@link PeakEwmaTuner} based on the observed
- * coefficient of variation, so noisy methods don't lock onto a stale peak.
+ * Both half-lives come from the method's {@link MethodScale}: a number of samples of the fleet's
+ * observed traffic (so they mean the same thing at any request rate and latency), with the peak's
+ * further shortened for noisy methods so it doesn't lock onto noise spikes.
  *
  * <p>Mean and variance are exponentially weighted with the slow half-life (bias-corrected, so the
  * first samples count fully), so the coefficient of variation reflects recent behaviour rather than
@@ -44,6 +44,9 @@ public final class MethodStats {
             boolean fastIsSeed) {}
 
     private final AtomicReference<State> state;
+
+    // The fleet's view of this method (half-lives, seed); replaced by the outlier tick.
+    private volatile MethodScale scale = MethodScale.DEFAULT;
 
     /**
      * Creates a new {@code MethodStats} seeded from the initial RTT and timestamp.
@@ -122,7 +125,7 @@ public final class MethodStats {
      * updated within {@link #minSmoothingIntervalNanos}. Skipping it is exact for the fast EWMA:
      * readers decay the stored peak to now, which is what {@code max(rtt, decayed)} would store.
      */
-    private static boolean redundant(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+    private boolean redundant(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
         long interval = minSmoothingIntervalNanos;
         if (interval <= 0 || s.fastIsSeed || s.samples == 0) return false;
         // Out-of-order completions (now < lastUpdate) count as "within the interval".
@@ -132,14 +135,14 @@ public final class MethodStats {
                         * EwmaClocks.decayFactor(
                                 now,
                                 s.lastUpdateNanos,
-                                PeakEwmaTuner.tauFastMillis(coeffVar(s), cfg));
+                                PeakEwmaTuner.tauFastMillis(coeffVar(s), scale));
         return rttMicros <= decayed;
     }
 
-    private static State afterFailure(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+    private State afterFailure(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
         double decayFast =
                 EwmaClocks.decayFactor(
-                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(coeffVar(s), cfg));
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(coeffVar(s), scale));
         double decayed = s.fastMicros * decayFast;
         double penalty =
                 Math.min(
@@ -156,14 +159,14 @@ public final class MethodStats {
                 false);
     }
 
-    private static State afterSample(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+    private State afterSample(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
         double cv = coeffVar(s);
         double decayFast =
                 EwmaClocks.decayFactor(
-                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(cv, cfg));
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(cv, scale));
         double decaySlow =
                 EwmaClocks.decayFactor(
-                        now, s.lastUpdateNanos, PeakEwmaTuner.tauSlowMillis(cv, cfg));
+                        now, s.lastUpdateNanos, PeakEwmaTuner.tauSlowMillis(cv, scale));
 
         // The first real sample replaces the seed outright. Blending it with the seed using the
         // 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
@@ -193,6 +196,14 @@ public final class MethodStats {
 
     private static double coeffVar(State s) {
         return Math.sqrt(Math.max(0.0, s.varMicros)) / Math.max(1e-6, s.meanMicros);
+    }
+
+    MethodScale scale() {
+        return scale;
+    }
+
+    void setScale(MethodScale scale) {
+        this.scale = scale;
     }
 
     /** One consistent snapshot of all statistics. */

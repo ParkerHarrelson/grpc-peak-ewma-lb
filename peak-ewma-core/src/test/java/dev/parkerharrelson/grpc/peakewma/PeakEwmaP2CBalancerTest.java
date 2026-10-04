@@ -671,7 +671,8 @@ class PeakEwmaP2CBalancerTest {
 
         MethodStats staleStats = newMethodStatsUnsafe();
         setAtomicLongFieldValue(staleStats, now - TimeUnit.SECONDS.toNanos(10));
-        setVolatileLongField(staleStats, now - TimeUnit.SECONDS.toNanos(30));
+        // Stale = no sample for two baseline half-lives (60 s before any traffic is observed).
+        setVolatileLongField(staleStats, now - TimeUnit.SECONDS.toNanos(120));
         setAtomicIntFieldValue(staleStats);
         setVolatileDoubleField(staleStats, "ewmaFastMicros", 200.0);
         setVolatileDoubleField(staleStats, "ewmaSlowMicros", 400.0);

@@ -52,6 +52,9 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
     private static final long RECONNECT_DEBOUNCE_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private final Map<Subchannel, MethodTable> tables = new ConcurrentHashMap<>();
+    // Per-method view of the whole fleet (sample-based half-lives, typical latency), recomputed
+    // every outlier tick and shared with every backend's MethodTable.
+    private final ConcurrentHashMap<String, MethodScale> fleetScales = new ConcurrentHashMap<>();
     private final Map<Subchannel, SubchannelState> states = new ConcurrentHashMap<>();
     private final Map<Subchannel, String> subchannelIds = new ConcurrentHashMap<>();
     private final Map<Subchannel, ConnectivityState> subchannelConn = new ConcurrentHashMap<>();
@@ -161,7 +164,7 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
 
     private void ensureOutlierTicker() {
         var config = cfg.get();
-        boolean enabled = config.outlierEnabled && config.outlierWindowMillis > 0;
+        boolean enabled = config.outlierEnabled;
         outlierLock.lock();
         try {
             if (!enabled) {
@@ -302,8 +305,23 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 double medianSlow = warmSlow.size() >= 3 ? median(warmSlow) : Double.NaN;
                 double fleetRate = rateSum / n;
 
+                // Re-derive the method's memory lengths from what the fleet actually sees: K
+                // samples of a fair share of its traffic, never less than a few RTTs. Uses the
+                // FLEET rate, not each peer's own: an avoided peer's own rate falls, which would
+                // lengthen its memory and keep it locked out.
+                if (fleetRate > 0) {
+                    double typical = !warmSlow.isEmpty() ? median(warmSlow) : Double.NaN;
+                    MethodScale sc = MethodScale.of(fleetRate, typical);
+                    fleetScales.put(method, sc);
+                    for (PeerMethod pm : peers) pm.stats.setScale(sc);
+                }
+
                 for (PeerMethod pm : peers) {
-                    long winMsEff = PeakEwmaTuner.windowMillisEff(pm.rate, fleetRate);
+                    long winMsEff =
+                            PeakEwmaTuner.windowMillisEff(
+                                    pm.rate,
+                                    fleetRate,
+                                    Math.max(100L, c.outlierTickIntervalMillis));
                     pm.window.setWindowMillis(winMsEff);
                     metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
 
@@ -354,6 +372,7 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 }
             }
 
+            fleetScales.keySet().retainAll(byMethod.keySet());
             metrics.setAdaptiveTuning(OUTLIER_ERROR_RATE, c.outlierErrorRate);
             metrics.setReadySubchannelCount(n);
             metrics.setEjectedSubchannelCount(ejectedSubchannels);
@@ -383,7 +402,8 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         long sinceLast = Math.max(0L, now - ms.getLastUpdateNanos());
         return ms.getSamples() >= minSamples
                 && sinceFirst >= EwmaClocks.millisToNanos(minWarmMs)
-                && sinceLast < EwmaClocks.millisToNanos(c.staleMillisForRatio);
+                // Stale = no sample for two baseline half-lives (sample-based, not a fixed time).
+                && sinceLast < EwmaClocks.millisToNanos(2 * PeakEwmaTuner.tauSlowMillis(ms, c));
     }
 
     private static double median(List<Double> values) {
@@ -595,7 +615,7 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                                     .build());
 
             PeakEwmaConfig cfgSnap = cfg.get();
-            MethodTable methodTable = new MethodTable(cfgSnap, clocks);
+            MethodTable methodTable = new MethodTable(cfgSnap, clocks, fleetScales);
             SubchannelState subchannelState = new SubchannelState();
 
             tables.put(subchannel, methodTable);

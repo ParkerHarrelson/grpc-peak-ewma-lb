@@ -325,25 +325,14 @@ public final class P2CPicker extends SubchannelPicker {
                         EPS,
                         ms != null
                                 ? decayedPeakMicros(ms, now, cfg)
-                                // Never served this method: its seed, decayed since the peer
-                                // became READY, so long-ready peers get probed for new methods.
-                                : mt.cachedSeedMicros()
-                                        * EwmaClocks.decayFactor(
-                                                now, st.readySinceNanos(), cfg.tauFastMillis));
+                                // Never served this method: assume the fleet's typical latency
+                                // for it, so the peer competes at par and its own first
+                                // responses decide (this replaces the old fixed warmup ramp).
+                                : mt.seedMicros(method));
 
+        // latency x (inflight + 1): the expected wait behind the calls already queued there.
         double busy = 1.0 + inflightWeightEff * Math.max(0, mt.getInflight());
-
-        long warmupMsEff = PeakEwmaTuner.warmupMillisEff(mt);
-        long ageNanos = Math.max(0L, now - st.readySinceNanos());
-        double warm =
-                (warmupMsEff <= 0)
-                        ? 1.0
-                        : 2.0
-                                - Math.min(
-                                        1.0,
-                                        ageNanos / (double) EwmaClocks.millisToNanos(warmupMsEff));
-
-        return score * busy * warm;
+        return score * busy;
     }
 
     /**

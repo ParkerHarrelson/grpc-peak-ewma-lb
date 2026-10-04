@@ -2,7 +2,7 @@
 
 A latency-aware load balancing policy for [grpc-java](https://github.com/grpc/grpc-java).
 
-grpc-java ships `pick_first` and `round_robin`. Neither looks at how backends are actually
+grpc-java's `pick_first` and `round_robin` don't look at how backends are actually
 performing, so one slow pod (GC pause, noisy neighbour, cold cache) still gets its full share of
 traffic and drags tail latency up for everyone. `peak_ewma_p2c` routes away from slow and failing
 backends using **Peak EWMA** latency scoring with **Power of Two Choices** selection, plus built-in
@@ -49,37 +49,53 @@ most of the benefit of always picking the global best, without every client stam
 `Get` on the same backend:
 
 ```
-cost = latencyEwma × (1 + inflightWeight × inflight) × warmupFactor
+cost = peakLatency(now) × (inflight + 1)
 ```
 
-- **Two EWMAs per method.**
-  - *Fast (peak) EWMA:* `max(rtt, previous × decay)`. A single slow response raises the score
-    right away, and the score decays back down over time.
-  - *Slow EWMA:* standard smoothing, used for cold or stale peers and as the baseline for outlier
-    detection.
-- **Inflight penalty.** Backends with more outstanding streams cost more, which spreads load before
-  latency degrades. The weight adapts to the cluster's median inflight count.
-- **Warmup.** A newly connected backend starts at 2× cost, decaying to 1× so it isn't flooded
-  before its JIT and caches are warm.
-- **Adaptive decay.** Half-lives are tuned from each method's observed coefficient of variation, so
-  noisy methods don't get stuck on an old peak.
+- **Peak latency.** `max(rtt, previous × decay)`: a single slow response raises the score right
+  away, and the score decays back toward zero *at read time*. A backend that stopped getting
+  traffic gets cheaper until it is probed again, so a spike wears off and recovery is automatic.
+- **Inflight.** The standard Peak-EWMA load term (as in Finagle and tower): the expected wait behind
+  the unary calls already outstanding on that backend. Long-lived streams don't count as load.
+- **Failures** (`UNAVAILABLE`, `INTERNAL`, …) count as a penalty, so a backend that fails instantly
+  doesn't look like the fastest one.
+- **New backends** start at the fleet's typical latency for each method, so they compete at par and
+  their own first responses decide.
 
-**Outlier ejection.** A background tick tracks per-subchannel error rate over a sliding window and
-the fast/slow latency ratio. If a backend crosses `outlierErrorRate` or `outlierLatencyMultiplier`,
-it is ejected for `outlierEjectMillis`. A re-entry cooldown prevents flapping. If every backend is
-ejected, the picker falls back to the least-bad one rather than failing calls.
+### Self-tuning: no knobs to set
+
+Nothing in the scoring is a fixed number of milliseconds. Every outlier tick derives, per method,
+from what the fleet actually observes:
+
+| | derived as |
+|---|---|
+| peak half-life | ~20 samples of a fair share of the method's traffic, at least 2 RTTs, at most 60 s; shortened for noisy methods |
+| baseline half-life | ~600 samples, at least 20 RTTs, within 1 s – 5 min |
+| error window | ~200 calls of the method, at least 2 ticks, at most 5 min |
+| staleness | two baseline half-lives |
+
+A 2 ms method at 2,000 rps and a 1 s method at 5 rps therefore behave the same *per sample*: in
+simulation the same 3×-slow backend gets 0.2–2% of traffic across that whole range, versus
+0.1–7.5% with the old fixed 1 s half-life (`AdversarialScaleTest`).
+
+**Outlier ejection.** A background tick looks at each backend per method. A backend whose error rate
+over the window crosses `outlierErrorRate` is ejected entirely. A backend that is slow for one method
+compared with the fleet's median for it is ejected for that method only. At least one backend can
+always be ejected, and at least one always stays in rotation. A re-entry cooldown prevents flapping.
 
 RTTs come from a `ClientStreamTracer` attached to each pick, so no interceptors are needed.
 
 ## Configuration
 
-The defaults work without any configuration. To tune, use the standard gRPC service config:
+The defaults are meant to be left alone: the balancer adapts to your fleet size, latencies and
+request rates. What remains configurable is **policy** (how aggressive ejection should be) and
+**resource limits**, through the standard gRPC service config:
 
 ```java
 Map<String, ?> serviceConfig =
         Map.of(
                 "loadBalancingConfig",
-                List.of(Map.of("peak_ewma_p2c", Map.of("inflightWeight", 0.25))));
+                List.of(Map.of("peak_ewma_p2c", Map.of("outlierErrorRate", 0.5))));
 
 ManagedChannelBuilder.forTarget("dns:///my-service.internal:9090")
         .defaultServiceConfig(serviceConfig)
@@ -90,20 +106,19 @@ ManagedChannelBuilder.forTarget("dns:///my-service.internal:9090")
 
 | Key                            | Default  | Meaning                                                        |
 |--------------------------------|----------|----------------------------------------------------------------|
-| `tauFastMillis`                | `1000`   | Base half-life of the fast (peak) EWMA                         |
-| `tauSlowMillis`                | `30000`  | Base half-life of the slow EWMA                                |
-| `inflightWeight`               | `0.15`   | Base cost multiplier per outstanding stream                    |
-| `initialRttMicros`             | `50000`  | Seed latency for methods with no samples                       |
 | `outlierEnabled`               | `true`   | Enable outlier ejection                                        |
-| `outlierWindowMillis`          | `15000`  | Sliding window for error-rate tracking                         |
-| `outlierErrorRate`             | `0.20`   | Error rate that triggers ejection                              |
-| `outlierLatencyMultiplier`     | `2.5`    | Fast/slow latency ratio that triggers ejection                 |
+| `outlierErrorRate`             | `0.20`   | Error rate that ejects a backend                               |
+| `outlierLatencyMultiplier`     | `2.5`    | How many times slower than the fleet median ejects a method (adjusted for noise) |
 | `outlierEjectMillis`           | `15000`  | How long an ejected backend stays out                          |
 | `outlierReentryCooldownMillis` | `5000`   | Minimum time between re-entry and another ejection             |
 | `outlierTickIntervalMillis`    | `1000`   | Outlier evaluation period (min 100)                            |
-| `staleMillisForRatio`          | `30000`  | Ignore latency ratio if samples are older than this            |
+| `initialRttMicros`             | `50000`  | Latency assumed before anything has been measured anywhere     |
 | `methodMaxEntries`             | `512`    | Max tracked methods per subchannel                             |
 | `methodPruneStaleAfterMillis`  | `120000` | Drop per-method stats that haven't been updated in this long   |
+
+**Deprecated, ignored:** `tauFastMillis`, `tauSlowMillis`, `inflightWeight`, `outlierWindowMillis`,
+`staleMillisForRatio`. They still parse so existing service configs keep working, and log a warning
+once; the balancer derives these from observed traffic.
 
 ## Metrics
 
