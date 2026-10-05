@@ -461,8 +461,6 @@ public final class LoadGen {
         Map<String, Long> sumPicks = new TreeMap<>();
         Map<String, Long> sumEjections = new TreeMap<>();
         Histogram pickTotal = new Histogram(3);
-        Histogram corePickTotal = new Histogram(3);
-        Map<String, Histogram> tracerTotal = new TreeMap<>();
         Histogram tickTotal = new Histogram(3);
         Map<String, Map<String, Long>> phaseStatus = new LinkedHashMap<>();
         Map<String, Long> phaseCompleted = new LinkedHashMap<>();
@@ -626,11 +624,8 @@ public final class LoadGen {
                 sb.append('}');
             }
             Histogram pickH = TimedPolicyProvider.PICK_NANOS.getIntervalHistogram();
-            Histogram corePickH = lbMetrics.pickNanos.getIntervalHistogram();
             Histogram tickH = lbMetrics.tickNanos.getIntervalHistogram();
             long tickBusy = lbMetrics.tickBusyNanos.sumThenReset();
-            Map<String, Histogram> tracerH = new TreeMap<>();
-            lbMetrics.tracerNanos.forEach((k, r) -> tracerH.put(k, r.getIntervalHistogram()));
             if (tickH.getTotalCount() > 0) {
                 sb.append(",\"tick\":{");
                 sb.append("\"n\":").append(tickH.getTotalCount());
@@ -663,10 +658,7 @@ public final class LoadGen {
                 picks.forEach((k, v) -> sumPicks.merge(k, v, Long::sum));
                 for (var e : ej) sumEjections.merge(e.reason(), 1L, Long::sum);
                 pickTotal.add(pickH);
-                corePickTotal.add(corePickH);
                 tickTotal.add(tickH);
-                tracerH.forEach(
-                        (k, h) -> tracerTotal.computeIfAbsent(k, x -> new Histogram(3)).add(h));
                 gcPauseTotal.add(gcPauseMicros.getIntervalHistogram());
                 for (String p : activePhases) {
                     var ps = phaseStatus.computeIfAbsent(p, k -> new TreeMap<>());
@@ -760,24 +752,6 @@ public final class LoadGen {
         sb.append(",\"pick_ns\":{\"n\":").append(pickTotal.getTotalCount());
         appendPercentiles(sb, pickTotal, 1, "");
         sb.append('}');
-        if (corePickTotal.getTotalCount() > 0) {
-            sb.append(",\"core_pick_ns\":{\"n\":").append(corePickTotal.getTotalCount());
-            appendPercentiles(sb, corePickTotal, 1, "");
-            sb.append('}');
-        }
-        sb.append(",\"tracer_ns\":{");
-        first = true;
-        for (var e : tracerTotal.entrySet()) {
-            if (!first) sb.append(',');
-            first = false;
-            sb.append('"')
-                    .append(e.getKey())
-                    .append("\":{\"n\":")
-                    .append(e.getValue().getTotalCount());
-            appendPercentiles(sb, e.getValue(), 1, "");
-            sb.append('}');
-        }
-        sb.append('}');
         sb.append(",\"tick_ms\":{\"n\":").append(tickTotal.getTotalCount());
         num(sb, "p50", tickTotal.getValueAtPercentile(50) / 1e6);
         num(sb, "p99", tickTotal.getValueAtPercentile(99) / 1e6);
@@ -805,8 +779,6 @@ public final class LoadGen {
         sb.append(",\"grpc\":\"").append(grpcVersion()).append('"');
         sb.append(",\"cpus\":").append(Runtime.getRuntime().availableProcessors());
         sb.append(",\"start_epoch_ms\":").append(System.currentTimeMillis());
-        sb.append(",\"sampled_timers\":")
-                .append(dev.parkerharrelson.grpc.peakewma.metrics.SampledTimers.ENABLED);
         sb.append(",\"args\":{");
         boolean first = true;
         for (var e : args.asMap().entrySet()) {

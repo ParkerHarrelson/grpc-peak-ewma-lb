@@ -233,8 +233,7 @@ class Fleet:
 # Tier 2
 
 
-T2_JVM = ["-Xms256m", "-Xmx384m", "-XX:+UseG1GC", "-XX:ActiveProcessorCount=2",
-          "-Dpeakewma.sampledTimers=true"]
+T2_JVM = ["-Xms256m", "-Xmx384m", "-XX:+UseG1GC", "-XX:ActiveProcessorCount=2"]
 
 SINGLE = {"methods": "U10_get", "mean_ms": 10.0}
 MULTI = {
@@ -433,8 +432,7 @@ def run_tier2(out, name, spec, repeat, n_backends=20, load=0.70, clients_per_pol
 # Tier 1
 
 
-T1_JVM = ["-Xms1g", "-Xmx1g", "-XX:+UseG1GC", "-XX:ActiveProcessorCount=4",
-          "-Dpeakewma.sampledTimers=true"]
+T1_JVM = ["-Xms1g", "-Xmx1g", "-XX:+UseG1GC", "-XX:ActiveProcessorCount=4"]
 CENTRE = {"backends": 10, "methods": 10, "rps": 10000, "threads": 8, "mix": "unary",
           "payload": 100}
 

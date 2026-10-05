@@ -75,20 +75,4 @@ public interface LbMetrics {
     default void recordOutlierTick(long durationNanos) {
         // default no-op so existing implementations need not be updated
     }
-
-    /**
-     * Records one sampled {@code pickSubchannel} duration. Only called when {@link SampledTimers}
-     * is enabled, for about one pick in {@link SampledTimers#EVERY}.
-     */
-    default void recordPickNanos(long durationNanos) {
-        // default no-op so existing implementations need not be updated
-    }
-
-    /**
-     * Records one sampled stream-tracer callback duration; {@code callback} is {@code
-     * streamCreated} or {@code streamClosed}. Only called when {@link SampledTimers} is enabled.
-     */
-    default void recordTracerNanos(String callback, long durationNanos) {
-        // default no-op so existing implementations need not be updated
-    }
 }

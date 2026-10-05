@@ -48,9 +48,7 @@ public final class MicrometerLbMetrics implements LbMetrics {
             new ConcurrentHashMap<>();
     private final Map<String, Timer> rttTimerByMethod = new ConcurrentHashMap<>();
     private final Map<String, AtomicReference<Double>> scaleValues = new ConcurrentHashMap<>();
-    private final Map<String, Timer> tracerTimers = new ConcurrentHashMap<>();
     private volatile Timer outlierTickTimer;
-    private volatile Timer pickTimer;
 
     public MicrometerLbMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -346,34 +344,5 @@ public final class MicrometerLbMetrics implements LbMetrics {
             outlierTickTimer = t;
         }
         t.record(durationNanos, TimeUnit.NANOSECONDS);
-    }
-
-    @Override
-    public void recordPickNanos(long durationNanos) {
-        Timer t = pickTimer;
-        if (t == null) {
-            t =
-                    Timer.builder("lb.pick.duration")
-                            .description("Sampled pickSubchannel duration.")
-                            .publishPercentiles(0.5, 0.99, 0.999)
-                            .register(registry);
-            pickTimer = t;
-        }
-        t.record(durationNanos, TimeUnit.NANOSECONDS);
-    }
-
-    @Override
-    public void recordTracerNanos(String callback, long durationNanos) {
-        if (callback == null) return;
-        tracerTimers
-                .computeIfAbsent(
-                        callback,
-                        c ->
-                                Timer.builder("lb.tracer.duration")
-                                        .description("Sampled stream-tracer callback duration.")
-                                        .tag("callback", c)
-                                        .publishPercentiles(0.5, 0.99)
-                                        .register(registry))
-                .record(durationNanos, TimeUnit.NANOSECONDS);
     }
 }

@@ -23,7 +23,7 @@ spec:
             - sh
             - -c
             - >-
-              java -Xmx384m -Dpeakewma.sampledTimers=true -cp /app/loadtest.jar
+              java -Xmx384m -cp /app/loadtest.jar
               dev.parkerharrelson.grpc.peakewma.loadtest.LoadGen
               --target dns:///loadtest-backend.__NS__.svc.cluster.local:9000
               --policy __POLICY__ --client-id __CLIENT__ --rps __RPS__ --threads 4

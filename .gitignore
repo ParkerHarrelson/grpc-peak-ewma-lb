@@ -4,3 +4,4 @@ target/
 .DS_Store
 .vscode/
 peak-ewma-loadtest/k8s/.kubeconfig
+__pycache__/

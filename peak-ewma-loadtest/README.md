@@ -47,22 +47,18 @@ scenarios / cells; `--repeats`, `--t2-duration`, `--t1-duration` shorten things.
 | `Probe` | Methods are created on demand and their name is their shape: `U<ms>_<name>` unary with median `<ms>`, `S<ms>_<name>` server streaming (5 messages), `W_<name>` watch (1 msg/s until cancelled). Any number of names, including churning ones, without a proto |
 | `LoadGen` | One client pod, one policy. Open-loop at `--rps` (latency from each call's *intended* start: no coordinated omission) or closed-loop (`--rps 0 --outstanding N`) for saturation. Writes per-interval JSONL and a summary |
 | `TimedPolicyProvider` | `timed_<policy>`: any policy, unchanged, with 1 in 1,000 picks timed, so pick times compare like for like across policies |
-| `RecordingLbMetrics` | `LbMetrics` sink for LB internals: picks by outcome, ejections by reason, `MethodScale` per method, cost gauges, outlier-tick / sampled pick / tracer durations |
+| `RecordingLbMetrics` | `LbMetrics` sink for LB internals: picks by outcome, ejections by reason, `MethodScale` per method, cost gauges, outlier-tick durations |
 | `FileNameResolverProvider` | `file:///path`: endpoints are the lines of a file, polled every 500 ms. Pod churn = rewriting the file (what a headless Service's DNS answer does) |
 | `loadtest.jfc` | JFR template (`--jfr out.jfr --jfr-settings loadtest`): JDK `profile` with CPU sampling every 5 ms, for the flame-graph cells |
 | `scripts/run.py` | Scenario runner, both tiers (below) |
 | `scripts/report.py` | Raw JSONL → CSV + self-contained HTML + PDF + markdown summary with PNGs |
 
-### Instrumentation in the core (off the hot path unless enabled)
+### Instrumentation in the core
 
 - `LbMetrics.setMethodScale(method, peakHalfLifeMs, baselineHalfLifeMs, seedMicros)`: the
   half-lives and seed the balancer derived for each method, every tick. Micrometer / OTel export
   `lb.method.peak_half_life_millis`, `lb.method.baseline_half_life_millis`, `lb.method.seed_micros`.
 - `LbMetrics.recordOutlierTick(nanos)`: `lb.outlier.tick` timer.
-- `LbMetrics.recordPickNanos` / `recordTracerNanos(callback, nanos)`: sampled `pickSubchannel` and
-  `streamCreated` / `streamClosed` timers (`lb.pick.duration`, `lb.tracer.duration`), **only**
-  with `-Dpeakewma.sampledTimers=true` (1 in `-Dpeakewma.sampledTimers.every=1000`).
-  `SampledTimers.ENABLED` is a static final, so with the property unset the JIT drops the branch.
 
 All new `LbMetrics` methods are default no-ops, so existing implementations keep compiling.
 
@@ -79,7 +75,8 @@ under 1,000 churning methods (must plateau), and JFR profiles of the centre and 
 
 Per run the loadgen measures, itself, over the window: process CPU per RPC, bytes allocated per
 RPC (all threads), GC count / pause p99 / allocation rate, pick time (p50 / p99 / p99.9, 1 in
-1,000), tracer time and outlier tick (peak only), pick outcomes, and throughput (cores used).
+1,000, every policy, through `TimedPolicyProvider`), outlier tick (peak only), pick outcomes,
+and throughput (cores used).
 
 ## Tier 2: routing quality
 
@@ -114,9 +111,10 @@ for reference).
 ```
 <run-id>/
   SUMMARY.md, charts/*.png            committed: decision table, go/no-go, key charts
+  report/report.pdf                   committed: the same as a short PDF brief
   manifest.json                       committed: commit, JDK, gRPC, machine, JVM flags, policy configs
   report/data/*.csv                   committed: every table behind the report
-  report/report.html, report.pdf      local: full interactive report, PDF brief
+  report/report.html                  local: full interactive report
   run.log
   tier1/<cell>/cell.json, <policy>-r<k>.jsonl, logs/             local (raw)
   tier1_extra/memory_churn-<policy>.jsonl, jfr_<cell>-<policy>.{jsonl,jfr}

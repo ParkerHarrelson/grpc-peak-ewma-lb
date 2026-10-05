@@ -58,8 +58,6 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
     private final LongCounter ejections;
     private final DoubleHistogram rtt;
     private final DoubleHistogram outlierTick;
-    private final DoubleHistogram pickDuration;
-    private final DoubleHistogram tracerDuration;
 
     private final GaugeCell readyCount = new GaugeCell(Attributes.empty());
     private final GaugeCell ejectedCount = new GaugeCell(Attributes.empty());
@@ -75,7 +73,6 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
     private final Map<String, GaugeCell> peakHalfLifeByMethod = new ConcurrentHashMap<>();
     private final Map<String, GaugeCell> baselineHalfLifeByMethod = new ConcurrentHashMap<>();
     private final Map<String, GaugeCell> seedByMethod = new ConcurrentHashMap<>();
-    private final Map<String, Attributes> callbackAttrs = new ConcurrentHashMap<>();
 
     // Attribute sets for the synchronous instruments, cached so the hot path does not allocate.
     private final Map<String, Attributes> outcomeAttrs = new ConcurrentHashMap<>();
@@ -165,16 +162,6 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
                         .setDescription("Outlier tick duration on the synchronization context.")
                         .setUnit("s")
                         .build();
-        this.pickDuration =
-                meter.histogramBuilder("lb.pick.duration")
-                        .setDescription("Sampled pickSubchannel duration.")
-                        .setUnit("s")
-                        .build();
-        this.tracerDuration =
-                meter.histogramBuilder("lb.tracer.duration")
-                        .setDescription("Sampled stream-tracer callback duration.")
-                        .setUnit("s")
-                        .build();
     }
 
     @Override
@@ -192,20 +179,6 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
     @Override
     public void recordOutlierTick(long durationNanos) {
         outlierTick.record(durationNanos / 1_000_000_000.0);
-    }
-
-    @Override
-    public void recordPickNanos(long durationNanos) {
-        pickDuration.record(durationNanos / 1_000_000_000.0);
-    }
-
-    @Override
-    public void recordTracerNanos(String callback, long durationNanos) {
-        if (callback == null) return;
-        tracerDuration.record(
-                durationNanos / 1_000_000_000.0,
-                callbackAttrs.computeIfAbsent(
-                        callback, c -> Attributes.of(AttributeKey.stringKey("callback"), c)));
     }
 
     @Override

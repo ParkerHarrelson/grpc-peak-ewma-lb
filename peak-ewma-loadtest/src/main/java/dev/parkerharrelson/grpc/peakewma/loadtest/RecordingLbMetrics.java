@@ -9,8 +9,8 @@ import org.HdrHistogram.Recorder;
 
 /**
  * {@link LbMetrics} sink that keeps what the load-test report needs: pick outcomes, ejections by
- * reason, the fleet-derived scale per method, cost gauges, and the outlier-tick / sampled pick /
- * tracer durations. The loadgen drains it once per interval.
+ * reason, the fleet-derived scale per method, cost gauges, and the outlier-tick durations. The
+ * loadgen drains it once per interval.
  */
 final class RecordingLbMetrics implements LbMetrics {
 
@@ -21,10 +21,8 @@ final class RecordingLbMetrics implements LbMetrics {
     final ConcurrentHashMap<String, double[]> scales = new ConcurrentHashMap<>();
     final ConcurrentHashMap<String, Double> costs = new ConcurrentHashMap<>(); // "sc|method"
     final ConcurrentHashMap<String, Double> tuning = new ConcurrentHashMap<>();
-    final ConcurrentHashMap<String, Recorder> tracerNanos = new ConcurrentHashMap<>();
     final Recorder tickNanos = new Recorder(3);
     final LongAdder tickBusyNanos = new LongAdder();
-    final Recorder pickNanos = new Recorder(3);
     volatile int ready;
     volatile int ejected;
     final boolean keepCosts;
@@ -95,18 +93,6 @@ final class RecordingLbMetrics implements LbMetrics {
     public void recordOutlierTick(long durationNanos) {
         tickNanos.recordValue(Math.max(1, durationNanos));
         tickBusyNanos.add(durationNanos);
-    }
-
-    @Override
-    public void recordPickNanos(long durationNanos) {
-        pickNanos.recordValue(Math.max(1, durationNanos));
-    }
-
-    @Override
-    public void recordTracerNanos(String callback, long durationNanos) {
-        Recorder r = tracerNanos.get(callback);
-        (r != null ? r : tracerNanos.computeIfAbsent(callback, k -> new Recorder(3)))
-                .recordValue(Math.max(1, durationNanos));
     }
 
     Map<String, Long> drainPicks() {

@@ -2,7 +2,7 @@
 
 Commit `5eb6195` (dirty) · openjdk version "25.0.3" 2026-04-21 LTS · gRPC 1.78.0 · Darwin 25.3.0 arm64, 18 CPUs, 64.0 GB · local multi-process (one JVM per pod, loopback TCP, file:/// re-resolution)
 
-Generated from the raw run data with `report.py` (full interactive report: `report/report.html`, PDF brief: `report/report.pdf`; neither is committed). Tables: [`report/data/`](report/data/).
+Generated from the raw run data with `report.py`. PDF brief: [`report/report.pdf`](report/report.pdf) · tables: [`report/data/`](report/data/) · full interactive report: `report/report.html` (local only: regenerate it with `report.py`).
 
 ## Decision table
 

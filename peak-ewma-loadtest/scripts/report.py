@@ -442,11 +442,6 @@ def tier1_load(root):
                 "alloc_mb_per_s": s.get("alloc_mb_per_s"),
                 "pick_p50_ns": g(s, "pick_ns", "p50"), "pick_p99_ns": g(s, "pick_ns", "p99"),
                 "pick_p999_ns": g(s, "pick_ns", "p999"), "pick_samples": g(s, "pick_ns", "n", default=0),
-                "core_pick_p50_ns": g(s, "core_pick_ns", "p50"), "core_pick_p99_ns": g(s, "core_pick_ns", "p99"),
-                "tracer_created_p50_ns": g(s, "tracer_ns", "streamCreated", "p50"),
-                "tracer_created_p99_ns": g(s, "tracer_ns", "streamCreated", "p99"),
-                "tracer_closed_p50_ns": g(s, "tracer_ns", "streamClosed", "p50"),
-                "tracer_closed_p99_ns": g(s, "tracer_ns", "streamClosed", "p99"),
                 "tick_p50_ms": g(s, "tick_ms", "p50"), "tick_p99_ms": g(s, "tick_ms", "p99"),
                 "tick_busy_ms_per_s": g(s, "tick_ms", "busy_ms_per_s"),
                 "lat_p50_us": g(s, "latency", "all", "p50_us"), "lat_p99_us": g(s, "latency", "all", "p99_us"),
@@ -642,9 +637,6 @@ def tier1_sections(root, df):
         rows = []
         for cell, grp in pk.groupby("cell"):
             rows.append({"cell": cell,
-                         "core pick p50/p99 ns": f"{fmt(grp.core_pick_p50_ns.mean(), 0)} / {fmt(grp.core_pick_p99_ns.mean(), 0)}",
-                         "streamCreated p50/p99 ns": f"{fmt(grp.tracer_created_p50_ns.mean(), 0)} / {fmt(grp.tracer_created_p99_ns.mean(), 0)}",
-                         "streamClosed p50/p99 ns": f"{fmt(grp.tracer_closed_p50_ns.mean(), 0)} / {fmt(grp.tracer_closed_p99_ns.mean(), 0)}",
                          "outlier tick p50/p99 ms": f"{fmt(grp.tick_p50_ms.mean(), 3)} / {fmt(grp.tick_p99_ms.mean(), 3)}",
                          "sync-context busy ms/s": fmt(grp.tick_busy_ms_per_s.mean(), 3),
                          **{f"picks {k[5:]}": int(grp[k].sum()) for k in grp.columns
@@ -1968,8 +1960,9 @@ def write_summary(root, gn, heads, manifest, pngs, repeats_note, path, decision=
              f"Commit `{manifest.get('commit')}`{' (dirty)' if manifest.get('dirty') else ''} · {manifest.get('jdk')} · "
              f"gRPC {manifest.get('grpc')} · {manifest.get('os')}, {manifest.get('cpus')} CPUs, {manifest.get('mem_gb')} GB · "
              f"{manifest.get('mode')}", "",
-             f"Generated from the raw run data with `report.py` (full interactive report: `{rel}/report.html`, "
-             f"PDF brief: `{rel}/report.pdf`; neither is committed). Tables: [`{rel}/data/`]({rel}/data/).", "",
+             f"Generated from the raw run data with `report.py`. PDF brief: [`{rel}/report.pdf`]({rel}/report.pdf) · "
+             f"tables: [`{rel}/data/`]({rel}/data/) · full interactive report: `{rel}/report.html` (local only: "
+             f"regenerate it with `report.py`).", "",
              "## Decision table", "",
              "Worst-case p99 (the fault window, when there is one) and client error rate, mean of repeats. "
              + decision_counts(decision if decision is not None else pd.DataFrame()), "",

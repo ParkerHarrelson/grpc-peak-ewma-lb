@@ -6,7 +6,6 @@ import dev.parkerharrelson.grpc.peakewma.MethodTable;
 import dev.parkerharrelson.grpc.peakewma.PeakEwmaConfig;
 import dev.parkerharrelson.grpc.peakewma.metrics.LbMetrics;
 import dev.parkerharrelson.grpc.peakewma.metrics.NoopLbMetrics;
-import dev.parkerharrelson.grpc.peakewma.metrics.SampledTimers;
 import dev.parkerharrelson.grpc.peakewma.outlier.ErrorWindow;
 import io.grpc.Attributes;
 import io.grpc.ClientStreamTracer;
@@ -130,16 +129,6 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
 
     @Override
     public void streamCreated(Attributes transportAttrs, Metadata headers) {
-        if (SampledTimers.ENABLED && SampledTimers.sample()) {
-            long start = System.nanoTime();
-            onStreamCreated();
-            metrics.recordTracerNanos("streamCreated", System.nanoTime() - start);
-            return;
-        }
-        onStreamCreated();
-    }
-
-    private void onStreamCreated() {
         startNanos = clocks.nanoTime();
         streamCreated = true;
         // Only unary calls count as load: a long-lived stream (watch, subscription) occupies a
@@ -150,16 +139,6 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
 
     @Override
     public void streamClosed(Status status) {
-        if (SampledTimers.ENABLED && SampledTimers.sample()) {
-            long start = System.nanoTime();
-            onStreamClosed(status);
-            metrics.recordTracerNanos("streamClosed", System.nanoTime() - start);
-            return;
-        }
-        onStreamClosed(status);
-    }
-
-    private void onStreamClosed(Status status) {
         try {
             long end = clocks.nanoTime();
             long rtt = (startNanos == 0L) ? 0L : Math.max(0L, end - startNanos);
