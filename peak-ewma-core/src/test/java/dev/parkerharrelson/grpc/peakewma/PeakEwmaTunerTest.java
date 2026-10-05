@@ -67,9 +67,10 @@ class PeakEwmaTunerTest {
         MethodStats ms = new MethodStats(c.initialRttMicros, 0L);
 
         long t = 5_000_000_000L;
-        ms.update(t + 1_000, 20_000L * 1_000L, c);
-        ms.update(t + 2_000, 22_000L * 1_000L, c);
-        ms.update(t + 3_000, 18_000L * 1_000L, c);
+        // Spaced past the 1 ms smoothing interval so each sample reaches the variance.
+        ms.update(t + 2_000_000, 20_000L * 1_000L, c);
+        ms.update(t + 4_000_000, 22_000L * 1_000L, c);
+        ms.update(t + 6_000_000, 18_000L * 1_000L, c);
 
         double cv = PeakEwmaTuner.coeffVarFromEwma(ms);
         assertTrue(cv > 0.0 && cv < 0.5, "expected smallish CV, got " + cv);

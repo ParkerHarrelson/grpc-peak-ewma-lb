@@ -32,11 +32,18 @@ public final class MethodStats {
     /** Upper bound for the failure penalty recorded into the fast EWMA (10 s). */
     static final double MAX_PENALTY_MICROS = 10_000_000.0;
 
-    /** One consistent snapshot of the statistics. */
+    /**
+     * One consistent snapshot of the statistics. {@code lastUpdateNanos} is when the peak was last
+     * written (any sample or failure); {@code slowUpdateNanos} is when the smoothed statistics
+     * (slow EWMA, mean, variance) were. They differ because the smoothed statistics are thinned
+     * (see {@link #minSmoothingIntervalNanos}) and failures update only the peak; each EWMA must
+     * decay over the time since its own last write.
+     */
     record State(
             double fastMicros,
             double slowMicros,
             long lastUpdateNanos,
+            long slowUpdateNanos,
             long firstSampleNanos,
             int samples,
             double meanMicros,
@@ -61,6 +68,7 @@ public final class MethodStats {
                                 initialRttMicros,
                                 initialRttMicros,
                                 initNanos,
+                                initNanos,
                                 0L,
                                 0,
                                 0.0,
@@ -69,9 +77,9 @@ public final class MethodStats {
     }
 
     /**
-     * Records one observed RTT and advances both EWMAs + variance. Thread-safe. A sample that
-     * neither raises the peak nor is due for the smoothed statistics is skipped (see {@link
-     * #redundant}).
+     * Records one observed RTT and advances both EWMAs + variance. Thread-safe. Within {@link
+     * #minSmoothingIntervalNanos} of the last smoothed write only the peak is updated (see {@link
+     * #update(long, long, PeakEwmaConfig, boolean)}).
      *
      * @param nowNanos end-of-call timestamp from the shared clock
      * @param rttNanos observed RTT in nanoseconds; must be non-negative
@@ -91,6 +99,12 @@ public final class MethodStats {
      * slow EWMA and the variance only ever see real successful latencies, so they remain a clean
      * baseline for outlier detection.
      *
+     * <p>Successful samples always reach the peak (it must react to every spike). The smoothed
+     * statistics take at most one sample per {@link #minSmoothingIntervalNanos}: the first to
+     * arrive after the interval, whatever its value. Choosing by arrival time, not by value, keeps
+     * them unbiased; letting only peak-raising samples through inside the interval inflated the
+     * mean by 2-3x at tens of thousands of calls per second.
+     *
      * @param nowNanos end-of-call timestamp from the shared clock
      * @param rttNanos observed RTT in nanoseconds; must be non-negative
      * @param cfg current Peak-EWMA config (tau fast/slow etc.)
@@ -100,13 +114,17 @@ public final class MethodStats {
         double rttMicros = EwmaClocks.nanosToMicros(rttNanos);
         while (true) {
             State s = state.get();
-            if (!serverFailure && redundant(s, nowNanos, rttMicros, cfg)) {
-                return;
+            State next;
+            if (serverFailure) {
+                next = afterFailure(s, nowNanos, rttMicros);
+            } else if (smoothingDue(s, nowNanos)) {
+                next = afterSample(s, nowNanos, rttMicros);
+            } else {
+                // Exact to skip: readers decay the stored peak to now, which is what
+                // max(rtt, decayed) would store.
+                if (rttMicros <= decayedFast(s, nowNanos)) return;
+                next = withPeak(s, nowNanos, rttMicros);
             }
-            State next =
-                    serverFailure
-                            ? afterFailure(s, nowNanos, rttMicros, cfg)
-                            : afterSample(s, nowNanos, rttMicros, cfg);
             if (state.compareAndSet(s, next)) {
                 return;
             }
@@ -114,44 +132,44 @@ public final class MethodStats {
     }
 
     /**
-     * Minimum spacing between writes that only feed the smoothed statistics. At most one such write
-     * per (backend, method) per millisecond still gives the 30 s slow horizon tens of thousands of
-     * samples, and removes nearly all write contention at high request rates.
+     * Minimum spacing between writes to the smoothed statistics. At most one such write per
+     * (backend, method) per millisecond still gives the baseline horizon thousands of samples, and
+     * removes nearly all write contention at high request rates.
      */
     static volatile long minSmoothingIntervalNanos = 1_000_000L;
 
-    /**
-     * A sample needs no write when it doesn't raise the peak and the smoothed statistics were
-     * updated within {@link #minSmoothingIntervalNanos}. Skipping it is exact for the fast EWMA:
-     * readers decay the stored peak to now, which is what {@code max(rtt, decayed)} would store.
-     */
-    private boolean redundant(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+    private static boolean smoothingDue(State s, long now) {
         long interval = minSmoothingIntervalNanos;
-        if (interval <= 0 || s.fastIsSeed || s.samples == 0) return false;
-        // Out-of-order completions (now < lastUpdate) count as "within the interval".
-        if (now - s.lastUpdateNanos >= interval) return false;
-        double decayed =
-                s.fastMicros
-                        * EwmaClocks.decayFactor(
-                                now,
-                                s.lastUpdateNanos,
-                                PeakEwmaTuner.tauFastMillis(coeffVar(s), scale));
-        return rttMicros <= decayed;
+        // Out-of-order completions (now < slowUpdate) count as "within the interval".
+        return interval <= 0
+                || s.fastIsSeed
+                || s.samples == 0
+                || now - s.slowUpdateNanos >= interval;
     }
 
-    private State afterFailure(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
-        double decayFast =
-                EwmaClocks.decayFactor(
+    private double decayedFast(State s, long now) {
+        return s.fastMicros
+                * EwmaClocks.decayFactor(
                         now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(coeffVar(s), scale));
-        double decayed = s.fastMicros * decayFast;
-        double penalty =
-                Math.min(
-                        MAX_PENALTY_MICROS,
-                        Math.max(rttMicros, 2.0 * Math.max(decayed, s.slowMicros)));
+    }
+
+    /**
+     * The peak EWMA decayed to {@code now}, computed from one snapshot so the peak, its timestamp
+     * and the noise level that sets its half-life always belong together.
+     */
+    double decayedPeakMicros(long now) {
+        return decayedFast(state.get(), now);
+    }
+
+    // Timestamps only move forward: an out-of-order completion (ended earlier, CAS won later)
+    // must not rewind them, or readers would decay the peak over time that never passed.
+
+    private State withPeak(State s, long now, double rttMicros) {
         return new State(
-                Math.max(penalty, decayed),
+                rttMicros,
                 s.slowMicros,
-                now,
+                Math.max(now, s.lastUpdateNanos),
+                s.slowUpdateNanos,
                 s.firstSampleNanos,
                 s.samples,
                 s.meanMicros,
@@ -159,18 +177,33 @@ public final class MethodStats {
                 false);
     }
 
-    private State afterSample(State s, long now, double rttMicros, PeakEwmaConfig cfg) {
+    private State afterFailure(State s, long now, double rttMicros) {
+        double decayed = decayedFast(s, now);
+        double penalty =
+                Math.min(
+                        MAX_PENALTY_MICROS,
+                        Math.max(rttMicros, 2.0 * Math.max(decayed, s.slowMicros)));
+        return new State(
+                Math.max(penalty, decayed),
+                s.slowMicros,
+                Math.max(now, s.lastUpdateNanos),
+                s.slowUpdateNanos,
+                s.firstSampleNanos,
+                s.samples,
+                s.meanMicros,
+                s.varMicros,
+                false);
+    }
+
+    private State afterSample(State s, long now, double rttMicros) {
         double cv = coeffVar(s);
-        double decayFast =
-                EwmaClocks.decayFactor(
-                        now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(cv, scale));
         double decaySlow =
                 EwmaClocks.decayFactor(
-                        now, s.lastUpdateNanos, PeakEwmaTuner.tauSlowMillis(cv, scale));
+                        now, s.slowUpdateNanos, PeakEwmaTuner.tauSlowMillis(cv, scale));
 
         // The first real sample replaces the seed outright. Blending it with the seed using the
         // 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
-        double fast = s.fastIsSeed ? rttMicros : Math.max(rttMicros, s.fastMicros * decayFast);
+        double fast = s.fastIsSeed ? rttMicros : Math.max(rttMicros, decayedFast(s, now));
         double slow =
                 s.samples == 0 ? rttMicros : rttMicros * (1 - decaySlow) + s.slowMicros * decaySlow;
 
@@ -184,7 +217,8 @@ public final class MethodStats {
         return new State(
                 fast,
                 slow,
-                now,
+                Math.max(now, s.lastUpdateNanos),
+                Math.max(now, s.slowUpdateNanos),
                 s.firstSampleNanos == 0L ? now : s.firstSampleNanos,
                 // Saturating: only "at least minSamples" matters, and an int that wraps after
                 // 2^31 calls would flip a busy peer back to "cold".
@@ -273,6 +307,7 @@ public final class MethodStats {
                         fastMicros != null ? fastMicros : s.fastMicros,
                         slowMicros != null ? slowMicros : s.slowMicros,
                         lastUpdateNanos != null ? lastUpdateNanos : s.lastUpdateNanos,
+                        lastUpdateNanos != null ? lastUpdateNanos : s.slowUpdateNanos,
                         firstSampleNanos != null ? firstSampleNanos : s.firstSampleNanos,
                         samples != null ? samples : s.samples,
                         s.meanMicros,

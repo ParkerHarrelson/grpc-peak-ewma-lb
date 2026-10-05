@@ -134,9 +134,12 @@ public class ErrorWindow {
                 int head = headIndex.get();
                 closedWidthNanos[head] = curBw;
                 int next = (head + 1) % buckets;
-                headIndex.set(next);
+                // Clear the bucket BEFORE publishing it as the head: fast-path writers read
+                // headIndex without the lock, and one that saw the new head before the reset
+                // would have its write wiped (lost counts under concurrency).
                 success[next].reset();
                 err[next].reset();
+                headIndex.set(next);
                 closedBuckets = Math.min(buckets - 1, closedBuckets + 1);
             }
             startNanos.addAndGet(steps * curBw);

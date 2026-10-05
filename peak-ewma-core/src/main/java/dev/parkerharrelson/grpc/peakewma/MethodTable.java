@@ -73,6 +73,10 @@ public final class MethodTable {
      *     median if the method has not been seen before
      */
     public MethodStats statsFor(String method) {
+        // get() first: computeIfAbsent can lock the hash bin even when the key is present, and
+        // this runs on every completed RPC.
+        MethodStats existing = methods.get(method);
+        if (existing != null) return existing;
         return methods.computeIfAbsent(
                 method,
                 k -> {
@@ -95,6 +99,8 @@ public final class MethodTable {
      * @return the sliding error window for the given method, creating one if needed
      */
     public ErrorWindow windowFor(String method) {
+        ErrorWindow existing = methodWindows.get(method);
+        if (existing != null) return existing;
         return methodWindows.computeIfAbsent(
                 method, k -> new ErrorWindow(INITIAL_ERROR_WINDOW_MILLIS));
     }

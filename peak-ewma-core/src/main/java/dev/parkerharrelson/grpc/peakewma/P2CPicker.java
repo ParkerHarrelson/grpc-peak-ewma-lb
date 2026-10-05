@@ -320,9 +320,8 @@ public final class P2CPicker extends SubchannelPicker {
      *
      * <p>Every peer scores on its fast (peak) EWMA decayed to {@code now}, so a slow spike is
      * penalised immediately and wears off with time, and unmeasured peers (still on their seed)
-     * become cheap enough to be probed within a few half-lives. Multiplied by a busy factor
-     * (inflight weight) and a warmup factor that decays from 2.0 → 1.0 over the first warmupMsEff
-     * milliseconds of readiness.
+     * become cheap enough to be probed within a few half-lives. Multiplied by the busy factor
+     * (inflight + 1).
      *
      * <p>Does not apply ejection — callers decide whether to treat an ejected subchannel as
      * infinity (picker) or just show the would-be cost (metrics).
@@ -358,9 +357,7 @@ public final class P2CPicker extends SubchannelPicker {
      * cost shrinks until it gets picked again and re-measured.
      */
     static double decayedPeakMicros(MethodStats ms, long now, PeakEwmaConfig cfg) {
-        long tauFastEff = PeakEwmaTuner.tauFastMillis(ms, cfg);
-        return ms.getEwmaFastMicros()
-                * EwmaClocks.decayFactor(now, ms.getLastUpdateNanos(), tauFastEff);
+        return ms.decayedPeakMicros(now);
     }
 
     private static String methodName(MethodDescriptor<?, ?> methodDescriptor) {
