@@ -79,13 +79,25 @@ A 2 ms method at 2,000 rps and a 1 s method at 5 rps therefore behave the same *
 simulation the same 3×-slow backend gets 0.2–2% of traffic across that whole range, versus
 0.1–7.5% with the old fixed 1 s half-life (`AdversarialScaleTest`).
 
-**Outlier ejection.** A background tick looks at each backend per method. A backend is ejected entirely when
-it is statistically clear (95% lower bound) that its error rate exceeds `outlierErrorRate`;
-only backend-health failures count (`UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, …), not
-application errors such as `NOT_FOUND`. Ejections back off: each repeat lasts one more base
-period, and healthy time forgives it. A backend that is slow for one method
-compared with the fleet's median for it is ejected for that method only. At least one backend can
-always be ejected, and at least one always stays in rotation. A returned backend is only re-ejected on fresh evidence, and repeat ejections back off.
+**Outlier ejection.** A background tick looks at each backend per method. Only backend-health
+failures count (`UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, …), not application errors such as
+`NOT_FOUND`.
+
+- **Errors** eject the whole backend when it is statistically clear (95% lower bound) that its
+  error rate exceeds `outlierErrorRate`, *or* that it is at least 1% and 3× what the rest of the
+  fleet sees for the method. The relative check catches a backend failing a few percent of calls
+  in a healthy fleet. It doesn't fire when every backend fails alike, e.g. when a shared
+  dependency is down.
+- **Latency** ejects a backend for one method when it is much slower than the fleet's median for
+  that method. It returns **on probation**: its history is cleared, so it is judged only on what
+  it does after returning (about 10 calls before it can be re-ejected), and it competes at the
+  fleet's typical latency rather than as the cheapest peer. A still-slow backend is re-ejected
+  after a few calls; a healed one is back at full share as soon as its ejection ends.
+- **Repeat ejections back off**, for errors and latency alike: each one lasts one more base
+  period (`outlierEjectMillis`, 5 s), up to 5 minutes, and each base period of healthy time
+  afterwards forgives one level.
+
+At least one backend can always be ejected, and at least one always stays in rotation.
 
 RTTs come from a `ClientStreamTracer` attached to each pick, so no interceptors are needed.
 
@@ -111,7 +123,7 @@ ManagedChannelBuilder.forTarget("dns:///my-service.internal:9090")
 | Key                            | Default  | Meaning                                                        |
 |--------------------------------|----------|----------------------------------------------------------------|
 | `outlierEnabled`               | `true`   | Enable outlier ejection                                        |
-| `outlierErrorRate`             | `0.20`   | Backend-health error rate that ejects a backend (judged statistically) |
+| `outlierErrorRate`             | `0.20`   | Backend-health error rate that ejects a backend (judged statistically); `0` disables error ejection, including the relative check |
 | `outlierLatencyMultiplier`     | `2.5`    | How many times slower than the fleet median ejects a method (adjusted for noise) |
 | `outlierEjectMillis`           | `5000`   | Base ejection time; each repeat ejection adds one more (backoff, ≤ 5 min) |
 | `outlierReentryCooldownMillis` | `0`      | Optional extra wait before a returned backend can be re-ejected (re-ejection already requires fresh evidence) |

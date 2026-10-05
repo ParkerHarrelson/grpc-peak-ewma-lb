@@ -154,7 +154,8 @@ public final class MethodTable {
 
     /** Ejection backoff for {@code method} on this backend (outlier tick only). */
     EjectionBackoff backoffFor(String method) {
-        return methodBackoff.computeIfAbsent(method, k -> new EjectionBackoff());
+        EjectionBackoff b = methodBackoff.get(method);
+        return b != null ? b : methodBackoff.computeIfAbsent(method, k -> new EjectionBackoff());
     }
 
     /** Marks {@code method} as ejected until the given nano-timestamp. */
@@ -184,6 +185,15 @@ public final class MethodTable {
      */
     public Set<String> methodKeys() {
         return Set.copyOf(methods.keySet());
+    }
+
+    /**
+     * Live, read-only view of the method keys, for the per-tick loops: iterating it copies nothing
+     * (a snapshot per backend per tick was measurable at hundreds of backends, #107). Weakly
+     * consistent, like any {@link ConcurrentHashMap} view.
+     */
+    Set<String> methodKeyView() {
+        return java.util.Collections.unmodifiableSet(methods.keySet());
     }
 
     /** Increments the subchannel's inflight counter. Called when a stream is created. */
@@ -244,14 +254,15 @@ public final class MethodTable {
             cachedSeedMicros = Math.max(MIN_SEED_MICROS, peakEwmaConfig.initialRttMicros);
             return;
         }
-        ArrayList<Double> vals = new ArrayList<>(methods.size());
+        double[] vals = new double[methods.size()];
+        int n = 0;
         for (MethodStats m : methods.values()) {
-            vals.add(m.getEwmaSlowMicros());
+            if (n == vals.length) break; // grew since sizing
+            vals[n++] = m.getEwmaSlowMicros();
         }
-        vals.sort(Double::compareTo);
-        int n = vals.size();
-        double median =
-                (n & 1) == 1 ? vals.get(n / 2) : 0.5 * (vals.get(n / 2 - 1) + vals.get(n / 2));
+        if (n == 0) return;
+        java.util.Arrays.sort(vals, 0, n);
+        double median = (n & 1) == 1 ? vals[n / 2] : 0.5 * (vals[n / 2 - 1] + vals[n / 2]);
         cachedSeedMicros = Math.max(MIN_SEED_MICROS, (long) Math.rint(median));
     }
 

@@ -41,6 +41,11 @@ final class RecordingLbMetrics implements LbMetrics {
     public void setInflight(String subchannelId, int inflight) {}
 
     @Override
+    public boolean recordsCosts() {
+        return keepCosts;
+    }
+
+    @Override
     public void setCost(String subchannelId, String method, double cost) {
         if (keepCosts) costs.put(subchannelId + "|" + method, cost);
     }

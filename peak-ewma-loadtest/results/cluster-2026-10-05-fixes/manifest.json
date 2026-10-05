@@ -1,0 +1,46 @@
+{
+ "commit": "1eb5caf",
+ "dirty": true,
+ "branch": "fix/106-107-108",
+ "jdk": "openjdk version \"25.0.3\" 2026-04-21 LTS",
+ "grpc": "1.78.0",
+ "os": "Darwin 25.3.0 arm64",
+ "cpus": 18,
+ "mem_gb": 64.0,
+ "mode": "local multi-process (one JVM per pod, loopback TCP, file:/// re-resolution)",
+ "backend_jvm": "-Xmx128m SerialGC, 2 cpus, C1 (TieredStopAtLevel=1)",
+ "tier1_client_jvm": "-Xms1g -Xmx1g -XX:+UseG1GC -XX:ActiveProcessorCount=4 -Dpeakewma.sampledTimers=true",
+ "tier2_client_jvm": "-Xms256m -Xmx384m -XX:+UseG1GC -XX:ActiveProcessorCount=2 -Dpeakewma.sampledTimers=true",
+ "backend_slots": 8,
+ "roles": {
+  "normal": {},
+  "noisy": {
+   "latencyFactor": 2.0,
+   "sigma": 0.8
+  },
+  "gc": {
+   "gcPeriodMillis": 10000,
+   "gcPauseMillis": 500
+  },
+  "flaky": {
+   "errorRate": 0.05
+  },
+  "throttled": {
+   "latencyFactor": 1.5,
+   "slots": 4
+  }
+ },
+ "lr_od_config": "outlier_detection_experimental: interval 10s, baseEjectionTime 30s, maxEjectionPercent 20, successRate (stdevFactor 1900, minimumHosts 5, requestVolume 100), failurePercentage (threshold 50, minimumHosts 5, requestVolume 50); child least_request_experimental choiceCount 2",
+ "args": {
+  "suite": "quick",
+  "out": "peak-ewma-loadtest/results/cluster-2026-10-05-fixes",
+  "repeats": 2,
+  "only": null,
+  "t2_warmup": 20,
+  "t2_duration": 90,
+  "t1_warmup": 4,
+  "t1_duration": 6
+ },
+ "started": "2026-10-05T11:21:07-0500",
+ "updated": "2026-10-05T11:54:16-0500"
+}

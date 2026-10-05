@@ -148,6 +148,10 @@ public final class MethodStats {
     }
 
     private double decayedFast(State s, long now) {
+        // A seed is a prior, not an observation: it holds until the first real sample replaces
+        // it. Decaying it would make a backend on probation (or never measured) look cheaper the
+        // longer it waits, and pull a burst of traffic onto it when it returns (#106).
+        if (s.fastIsSeed) return s.fastMicros;
         return s.fastMicros
                 * EwmaClocks.decayFactor(
                         now, s.lastUpdateNanos, PeakEwmaTuner.tauFastMillis(coeffVar(s), scale));
@@ -232,6 +236,17 @@ public final class MethodStats {
 
     private static double coeffVar(State s) {
         return Math.sqrt(Math.max(0.0, s.varMicros)) / Math.max(1e-6, s.meanMicros);
+    }
+
+    /**
+     * Puts this (backend, method) on probation after a latency ejection (#106): forgets everything
+     * it observed, so it is judged again only on samples taken after it returns, and must re-warm
+     * (see the balancer's {@code isWarm}) before it can be re-ejected. The peak is set to {@code
+     * seedMicros}, the fleet's typical latency, and held there until the first real sample, so the
+     * returning backend competes at par rather than as the cheapest peer.
+     */
+    void resetForProbation(double seedMicros, long nowNanos) {
+        state.set(new State(seedMicros, seedMicros, nowNanos, nowNanos, 0L, 0, 0.0, 0.0, true));
     }
 
     MethodScale scale() {

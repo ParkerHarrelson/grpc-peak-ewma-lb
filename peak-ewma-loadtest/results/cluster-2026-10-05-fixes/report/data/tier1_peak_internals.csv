@@ -1,0 +1,5 @@
+cell,outlier tick p50/p99 ms,sync-context busy ms/s,picks ok
+backends_50,0.755 / 1.306,0.837,120003
+backends_500,2.297 / 5.284,3.006,119939
+centre,0.227 / 0.309,0.251,120021
+corner_big,28.426 / 34.357,29.458,600192

@@ -19,6 +19,14 @@ public interface LbMetrics {
     /** Sets the current inflight stream count for the given subchannel. */
     void setInflight(String subchannelId, int inflight);
 
+    /**
+     * Whether this sink uses {@link #setCost}. Costs are computed per (subchannel, method) on every
+     * picker publish; a sink that drops them returns false so that work is skipped.
+     */
+    default boolean recordsCosts() {
+        return true;
+    }
+
     /** Sets the computed picker cost for the given (subchannel, method) pair. */
     void setCost(String subchannelId, String method, double cost);
 
