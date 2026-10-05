@@ -144,7 +144,11 @@ final class EwmaClientStreamTracer extends ClientStreamTracer {
             long rtt = (startNanos == 0L) ? 0L : Math.max(0L, end - startNanos);
 
             boolean serverFailure = isServerFailure(status);
-            if (serverFailure || (recordLatency && rtt > 0L)) {
+            // A call that completes while its (backend, method) is ejected for latency was sent
+            // before the ejection: its latency is from the fault, and must not count against the
+            // backend's probation when it returns (#106). The error window still sees it.
+            boolean ejected = table != null && table.isMethodEjected(method, end);
+            if (!ejected && (serverFailure || (recordLatency && rtt > 0L))) {
                 // A streaming call's duration is its lifetime, not a latency: it must not set
                 // the size of the failure penalty (an hour-long stream reset by GOAWAY would
                 // write the 10 s cap into the peak). Pass 0 so only the penalty applies.

@@ -1,0 +1,13 @@
+area,criterion,measured,result,note
+CPU overhead,client CPU/RPC ≤ +25% vs round_robin (10 backends),"30.50 vs 30.81 µs/RPC (-1.0%, n.s.); LB cost (− control) 7.27 vs 7.58 µs",PASS,whole-process CPU incl. Netty + harness; LB cost = policy − control
+CPU overhead,client CPU/RPC ≤ +25% vs round_robin (50 backends),"29.09 vs 29.65 µs/RPC (-1.9%, n.s.); LB cost (− control) 5.63 vs 6.20 µs",PASS,whole-process CPU incl. Netty + harness; LB cost = policy − control
+Allocation,bytes/RPC ≤ +10% vs round_robin (10 backends),"32,507 vs 32,258 B/RPC (+0.8%; Δ 249 B)",PASS,harness floor ≈ control's B/RPC dilutes the %; the absolute Δ is the LB's
+Memory,"LB heap plateaus under 1,000 churning methods",no data,N/A,
+Pick time,p99 pick < 5 µs at 500 backends,"9,336 ns (sampled 1/1000)",FAIL,wall time of pickSubchannel incl. the timer itself
+Steady heterogeneous,p99 better than round_robin; error rate ≤ round_robin,p99 26.9 vs 93.8 ms; errors 0.027% vs 0.267%,PASS,
+Brownout,detected within 10 s; p99 during brownout ≤ ½ round_robin's,detect 3.0 s; p99 during 21.5 vs 450.0 ms (0.05×),PASS,p99 is of successful calls; errors during the fault 0.03% vs 1.50% (round_robin's slowest calls hit the deadline and count as errors)
+Crash-loop,client error rate ≤ 20% of round_robin's (fault window),0.054% vs 4.872% (0.01×),PASS,
+Black hole,client error rate ≤ 20% of round_robin's (fault window),0.092% vs 4.813% (0.02×),PASS,
+Homogeneous steady,0 false ejections/hour; every share within ±10% of fair,0 ejections in 6.0 client-minutes (0/client-hour); shares 0.948–1.013× fair,PASS,
+Herd (16 clients),max healthy-backend share ≤ 1.5× fair,no data,N/A,
+vs least_request + outlier_detection,document where each wins,"s01: p99 peak (26.9/76.0 ms), errors peak; s02: p99 lr_od (21.3/21.3 ms), errors peak; s03: p99 lr_od (21.4/21.4 ms), errors peak; s04: p99 peak (21.4/21.4 ms), errors peak; s05: p99 lr_od (21.4/21.3 ms), errors peak; s10: p99 peak (22.4/26.3 ms), errors peak; s11: p99 peak (30.3/77.2 ms), errors peak",INFO,

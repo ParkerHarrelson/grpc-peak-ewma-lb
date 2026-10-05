@@ -9,6 +9,11 @@ public final class NoopLbMetrics implements LbMetrics {
     }
 
     @Override
+    public boolean recordsCosts() {
+        return false;
+    }
+
+    @Override
     public void recordPick(String outcome) {
         /* no-op */
     }

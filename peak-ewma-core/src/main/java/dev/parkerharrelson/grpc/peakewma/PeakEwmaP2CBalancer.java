@@ -260,11 +260,13 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 return;
             }
 
-            // One pass: per-method view of every ready peer that has served the method.
+            // One pass: per-method view of every ready peer that has served the method. Each
+            // peer's state and method ejection are resolved here once, not per check below.
             Map<String, List<PeerMethod>> byMethod = new HashMap<>();
             for (Subchannel sc : ready) {
                 MethodTable mt = tables.get(sc);
-                for (String method : mt.methodKeys()) {
+                SubchannelState st = states.get(sc);
+                for (String method : mt.methodKeyView()) {
                     MethodStats ms = mt.peekStats(method);
                     if (ms == null) {
                         continue;
@@ -275,7 +277,15 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                     byMethod.computeIfAbsent(method, k -> new ArrayList<>())
                             .add(
                                     new PeerMethod(
-                                            sc, mt, ms, w, snap, rate, isWarm(ms, rate, now, c)));
+                                            sc,
+                                            mt,
+                                            st,
+                                            ms,
+                                            w,
+                                            snap,
+                                            rate,
+                                            isWarm(ms, rate, now, c),
+                                            mt.methodEjectedUntilNanos(method)));
                 }
             }
 
@@ -283,12 +293,14 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             final long cooldown = EwmaClocks.millisToNanos(c.outlierReentryCooldownMillis);
             final int maxEjected = PeakEwmaTuner.maxEjectedCountEff(n);
             final int minReady = PeakEwmaTuner.minReadyAfterEjectEff(n);
+            final long tickMillis = Math.max(100L, c.outlierTickIntervalMillis);
             int ejectedSubchannels = 0;
             for (Subchannel sc : ready) {
                 SubchannelState st0 = states.get(sc);
                 st0.backoff().maybeForgive(now, baseEject, st0.isEjected(now));
                 if (st0.isEjected(now)) ejectedSubchannels++;
             }
+            long lastWindowMillis = -1;
 
             // Pass 1, per method: adapt half-lives and error windows, and eject whole backends
             // for errors. All error ejections are decided before any latency ejection, and take
@@ -300,26 +312,28 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 double rateSum = 0;
                 long total = 0;
                 long errors = 0;
-                List<Double> warmSlow = new ArrayList<>();
-                List<Double> warmFast = new ArrayList<>();
+                double[] warmSlow = new double[peers.size()];
+                double[] warmFast = new double[peers.size()];
+                int warm = 0;
                 for (PeerMethod pm : peers) {
                     rateSum += pm.rate;
                     total += pm.snap.total;
                     errors += pm.snap.errors;
                     if (pm.warm) {
-                        warmSlow.add(pm.stats.getEwmaSlowMicros());
-                        warmFast.add(pm.stats.getEwmaFastMicros());
+                        warmSlow[warm] = pm.stats.getEwmaSlowMicros();
+                        warmFast[warm] = pm.stats.getEwmaFastMicros();
+                        warm++;
                     }
                 }
                 double fleetRate = rateSum / n;
+                double medianSlow = warm > 0 ? median(warmSlow, warm) : Double.NaN;
 
                 // Re-derive the method's memory lengths from what the fleet actually sees: K
                 // samples of a fair share of its traffic, never less than a few RTTs. Uses the
                 // FLEET rate, not each peer's own: an avoided peer's own rate falls, which would
                 // lengthen its memory and keep it locked out.
                 if (fleetRate > 0) {
-                    double typical = !warmSlow.isEmpty() ? median(warmSlow) : Double.NaN;
-                    MethodScale sc = MethodScale.of(fleetRate, typical);
+                    MethodScale sc = MethodScale.of(fleetRate, medianSlow);
                     fleetScales.put(method, sc);
                     metrics.setMethodScale(
                             method, sc.tauFastMillis(), sc.tauSlowMillis(), sc.seedMicros());
@@ -327,30 +341,16 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 }
 
                 for (PeerMethod pm : peers) {
-                    long winMsEff =
-                            PeakEwmaTuner.windowMillisEff(
-                                    pm.rate,
-                                    fleetRate,
-                                    Math.max(100L, c.outlierTickIntervalMillis));
+                    long winMsEff = PeakEwmaTuner.windowMillisEff(pm.rate, fleetRate, tickMillis);
                     pm.window.setWindowMillis(winMsEff);
-                    metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, winMsEff);
-                    pm.table
-                            .backoffFor(method)
-                            .maybeForgive(now, baseEject, pm.table.isMethodEjected(method, now));
+                    lastWindowMillis = winMsEff;
+                    pm.table.backoffFor(method).maybeForgive(now, baseEject, pm.methodEjected(now));
                     if (!c.outlierEnabled) {
                         continue; // maintenance only: pruning, scales, windows
                     }
 
-                    SubchannelState st = states.get(pm.sc);
-                    // Statistically conclusive, not volume-gated: eject when the 95% lower bound
-                    // on the error rate is above the threshold.
-                    boolean highErr =
-                            c.outlierErrorRate > 0.0
-                                    && pm.snap.total >= PeakEwmaTuner.MIN_ERROR_EVIDENCE
-                                    && PeakEwmaTuner.errorRateLowerBound(
-                                                    pm.snap.errors, pm.snap.total)
-                                            >= c.outlierErrorRate;
-                    if (highErr
+                    SubchannelState st = pm.state;
+                    if (highErrorRate(pm, total, errors, c)
                             && !st.isEjected(now)
                             && now >= st.lastEjectEndNanos() + cooldown
                             && ejectedSubchannels < maxEjected
@@ -370,9 +370,12 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 // the same method-keyed gauge and the last one iterated won).
                 metrics.setMethodRate(method, rateSum);
                 metrics.setMethodErrorRate(method, total == 0 ? 0.0 : (double) errors / total);
-                if (!warmSlow.isEmpty()) {
-                    metrics.setMethodLatencyEwma(method, median(warmSlow), median(warmFast));
+                if (warm > 0) {
+                    metrics.setMethodLatencyEwma(method, medianSlow, median(warmFast, warm));
                 }
+            }
+            if (lastWindowMillis >= 0) {
+                metrics.setAdaptiveTuning(WINDOW_MILLIS_EFF, lastWindowMillis);
             }
 
             // Pass 2, per method: latency ejections. A peer is unavailable for a method if the
@@ -389,12 +392,13 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 final int keep = Math.min(minReady, p - 1); // peers that must stay available
 
                 int unavailable = 0;
-                List<Double> warmSlow = new ArrayList<>();
+                double[] warmSlow = new double[p];
+                int warm = 0;
                 for (PeerMethod pm : peers) {
-                    if (pm.table.isMethodEjected(method, now) || states.get(pm.sc).isEjected(now)) {
+                    if (pm.methodEjected(now) || pm.state.isEjected(now)) {
                         unavailable++;
                     }
-                    if (pm.warm) warmSlow.add(pm.stats.getEwmaSlowMicros());
+                    if (pm.warm) warmSlow[warm++] = pm.stats.getEwmaSlowMicros();
                 }
 
                 // A new error ejection can push the method over the cap: return latency-ejected
@@ -402,24 +406,22 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 if (unavailable > maxEjected || p - unavailable < keep) {
                     List<PeerMethod> methodOnly = new ArrayList<>();
                     for (PeerMethod pm : peers) {
-                        if (pm.table.isMethodEjected(method, now)
-                                && !states.get(pm.sc).isEjected(now)) {
+                        if (pm.methodEjected(now) && !pm.state.isEjected(now)) {
                             methodOnly.add(pm);
                         }
                     }
-                    methodOnly.sort(
-                            Comparator.comparingLong(
-                                    pm -> pm.table.methodEjectedUntilNanos(method)));
+                    methodOnly.sort(Comparator.comparingLong(pm -> pm.ejectedUntil));
                     for (PeerMethod pm : methodOnly) {
                         if (unavailable <= maxEjected && p - unavailable >= keep) break;
                         pm.table.ejectMethodUntil(method, now);
+                        pm.ejectedUntil = now;
                         unavailable--;
                     }
                 }
 
                 // Latency is judged against the fleet: needs >= 3 warm peers for a meaningful
                 // median (with 2 there is no telling which one is the outlier).
-                double medianSlow = warmSlow.size() >= 3 ? median(warmSlow) : Double.NaN;
+                double medianSlow = warm >= 3 ? median(warmSlow, warm) : Double.NaN;
                 if (Double.isNaN(medianSlow) || medianSlow <= 0) {
                     continue;
                 }
@@ -427,23 +429,30 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                     if (!pm.warm) {
                         continue;
                     }
-                    SubchannelState st = states.get(pm.sc);
                     double ratio = pm.stats.getEwmaSlowMicros() / medianSlow;
                     double multiplier =
                             PeakEwmaTuner.latencyMultiplierEff(
                                     PeakEwmaTuner.coeffVarFromEwma(pm.stats), c);
                     if (ratio >= multiplier
-                            && !st.isEjected(now)
-                            && !pm.table.isMethodEjected(method, now)
+                            && !pm.state.isEjected(now)
+                            && !pm.methodEjected(now)
                             // fresh evidence: a sample taken after the previous ejection ended
-                            && pm.stats.getLastUpdateNanos()
-                                    > pm.table.methodEjectedUntilNanos(method)
-                            && now >= pm.table.methodEjectedUntilNanos(method) + cooldown
+                            && pm.stats.getLastUpdateNanos() > pm.ejectedUntil
+                            && now >= pm.ejectedUntil + cooldown
                             && unavailable < maxEjected
                             && p - (unavailable + 1) >= keep) {
-                        pm.table.ejectMethodUntil(
-                                method,
-                                pm.table.backoffFor(method).nextEjectionEnd(now, baseEject));
+                        // Repeat ejections back off (one more base period each, forgiven by
+                        // healthy time, at most 5 min): a backend that keeps being slow is kept
+                        // out progressively longer instead of being re-probed every few seconds.
+                        long until = pm.table.backoffFor(method).nextEjectionEnd(now, baseEject);
+                        pm.table.ejectMethodUntil(method, until);
+                        pm.ejectedUntil = until;
+                        // Probation (#106): when it returns, judge it only on what it does after
+                        // returning. Its baseline is cleared (it must re-warm on fresh samples
+                        // before it can be re-ejected; stale fault-era stats used to re-eject a
+                        // healed backend on its first call) and its peak is held at the fleet's
+                        // typical latency, so it returns at par, not as everyone's cheapest peer.
+                        pm.stats.resetForProbation(medianSlow, now);
                         unavailable++;
                         metrics.recordOutlierEjection(
                                 subchannelIds.getOrDefault(pm.sc, UNKNOWN),
@@ -467,14 +476,71 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
     }
 
     /** One ready peer's view of one method, captured once per tick. */
-    private record PeerMethod(
-            Subchannel sc,
-            MethodTable table,
-            MethodStats stats,
-            ErrorWindow window,
-            ErrorWindow.Snapshot snap,
-            double rate,
-            boolean warm) {}
+    private static final class PeerMethod {
+        final Subchannel sc;
+        final MethodTable table;
+        final SubchannelState state;
+        final MethodStats stats;
+        final ErrorWindow window;
+        final ErrorWindow.Snapshot snap;
+        final double rate;
+        final boolean warm;
+        long ejectedUntil; // this method's ejection end on this peer; updated as the tick ejects
+
+        PeerMethod(
+                Subchannel sc,
+                MethodTable table,
+                SubchannelState state,
+                MethodStats stats,
+                ErrorWindow window,
+                ErrorWindow.Snapshot snap,
+                double rate,
+                boolean warm,
+                long ejectedUntil) {
+            this.sc = sc;
+            this.table = table;
+            this.state = state;
+            this.stats = stats;
+            this.window = window;
+            this.snap = snap;
+            this.rate = rate;
+            this.warm = warm;
+            this.ejectedUntil = ejectedUntil;
+        }
+
+        boolean methodEjected(long now) {
+            return now < ejectedUntil;
+        }
+    }
+
+    /**
+     * Whether a peer is failing badly enough to eject: statistically conclusive (the 95% lower
+     * bound on its error rate), not volume-gated. Either absolutely, above {@code
+     * outlierErrorRate}, or relative to the rest of the fleet for the method: at least {@link
+     * PeakEwmaTuner#RELATIVE_ERROR_FLOOR} and {@link PeakEwmaTuner#RELATIVE_ERROR_FACTOR} times
+     * what the other peers see. The relative check catches a backend failing a few percent of calls
+     * in a healthy fleet (#108) without ejecting anyone when every backend fails alike (a shared
+     * dependency).
+     */
+    private static boolean highErrorRate(
+            PeerMethod pm, long fleetTotal, long fleetErrors, PeakEwmaConfig c) {
+        if (c.outlierErrorRate <= 0.0 || pm.snap.total < PeakEwmaTuner.MIN_ERROR_EVIDENCE) {
+            return false;
+        }
+        double lower = PeakEwmaTuner.errorRateLowerBound(pm.snap.errors, pm.snap.total);
+        if (lower >= c.outlierErrorRate) {
+            return true;
+        }
+        long othersTotal = fleetTotal - pm.snap.total;
+        if (othersTotal < PeakEwmaTuner.MIN_ERROR_EVIDENCE) {
+            return false; // nothing to compare against
+        }
+        double othersRate = (double) (fleetErrors - pm.snap.errors) / othersTotal;
+        return lower
+                >= Math.max(
+                        PeakEwmaTuner.RELATIVE_ERROR_FLOOR,
+                        PeakEwmaTuner.RELATIVE_ERROR_FACTOR * othersRate);
+    }
 
     /** Enough recent samples, over enough time, to trust this peer's EWMAs. */
     private static boolean isWarm(MethodStats ms, double ratePerSec, long now, PeakEwmaConfig c) {
@@ -489,11 +555,10 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                 && sinceLast < EwmaClocks.millisToNanos(2 * PeakEwmaTuner.tauSlowMillis(ms, c));
     }
 
-    private static double median(List<Double> values) {
-        List<Double> v = new ArrayList<>(values);
-        v.sort(Double::compareTo);
-        int k = v.size();
-        return (k & 1) == 1 ? v.get(k / 2) : 0.5 * (v.get(k / 2 - 1) + v.get(k / 2));
+    /** Median of the first {@code k} values; sorts them in place. */
+    private static double median(double[] values, int k) {
+        java.util.Arrays.sort(values, 0, k);
+        return (k & 1) == 1 ? values[k / 2] : 0.5 * (values[k / 2 - 1] + values[k / 2]);
     }
 
     private void publishPicker() {
@@ -613,6 +678,9 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             return;
         }
 
+        // The per-(backend, method) cost loop is O(backends x methods) on every publish; skip it
+        // when the sink discards costs (the default no-op sink does).
+        boolean costs = metrics.recordsCosts();
         long now = clocks.nanoTime();
         for (Subchannel sc : ready) {
             MethodTable tbl = tables.get(sc);
@@ -624,8 +692,11 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
             String scId = subchannelIds.getOrDefault(sc, UNKNOWN);
             metrics.setInflight(scId, tbl.getInflight());
 
-            for (String methodKey : tbl.methodKeys()) {
-                MethodStats ms = tbl.statsFor(methodKey);
+            if (!costs) {
+                continue;
+            }
+            for (String methodKey : tbl.methodKeyView()) {
+                MethodStats ms = tbl.peekStats(methodKey);
                 if (ms == null) {
                     continue;
                 }

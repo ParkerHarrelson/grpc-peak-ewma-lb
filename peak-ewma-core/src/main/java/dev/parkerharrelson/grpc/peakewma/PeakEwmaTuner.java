@@ -100,6 +100,21 @@ final class PeakEwmaTuner {
     static final int MIN_ERROR_EVIDENCE = 5;
 
     /**
+     * Relative error ejection (#108): a backend is also ejected when the 95% lower bound on its
+     * error rate is at least this, and at least {@link #RELATIVE_ERROR_FACTOR} times the rest of
+     * the fleet's rate for the method. 1% keeps ordinary noise from ejecting anyone; with ~200
+     * calls in the window, a backend failing 5% of calls clears it.
+     */
+    static final double RELATIVE_ERROR_FLOOR = 0.01;
+
+    /**
+     * How many times worse than the other backends a backend's error rate must be (on its 95% lower
+     * bound). When every backend fails alike, e.g. a shared dependency is down, none is an outlier
+     * and nothing is ejected.
+     */
+    static final double RELATIVE_ERROR_FACTOR = 3.0;
+
+    /**
      * 95% Wilson lower bound on the true error rate given {@code errors} of {@code total}. A
      * backend is ejected when even this pessimistic-for-ejection estimate exceeds the threshold: 10
      * failures of 10 calls is conclusive (bound 0.72), 3 of 20 is not (0.05). Replaces a fixed
