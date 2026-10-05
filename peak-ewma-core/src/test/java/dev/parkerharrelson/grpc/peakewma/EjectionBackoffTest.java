@@ -43,4 +43,19 @@ class EjectionBackoffTest {
         }
         assertEquals(EjectionBackoff.MAX_EJECTION_NANOS, d);
     }
+
+    /** #103: with the default 5 s base, repeat ejections really reach the 5-minute cap. */
+    @Test
+    void defaultBase_reachesFiveMinuteCap_andLevelStopsThere() {
+        EjectionBackoff b = new EjectionBackoff();
+        long t = 0;
+        long d = 0;
+        for (int i = 0; i < 100; i++) {
+            long end = b.nextEjectionEnd(t, BASE);
+            d = end - t;
+            t = end;
+        }
+        assertEquals(EjectionBackoff.MAX_EJECTION_NANOS, d);
+        assertEquals(60, b.level(), "300 s / 5 s");
+    }
 }

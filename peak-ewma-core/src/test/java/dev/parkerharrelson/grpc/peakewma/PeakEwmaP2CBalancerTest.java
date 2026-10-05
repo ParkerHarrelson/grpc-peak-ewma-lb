@@ -474,7 +474,7 @@ class PeakEwmaP2CBalancerTest {
     }
 
     @Test
-    void ensureOutlierTicker_schedules_whenEnabled_andCancelsOnDisable() {
+    void ensureOutlierTicker_keepsRunning_whenOutlierDetectionDisabled() {
         var a = new EquivalentAddressGroup(new InetSocketAddress("127.0.0.1", 8001));
         balancer.handleResolvedAddresses(
                 LoadBalancer.ResolvedAddresses.newBuilder().setAddresses(List.of(a)).build());
@@ -493,7 +493,9 @@ class PeakEwmaP2CBalancerTest {
         ScheduledFuture<?> prevFuture = helper.scheduler.lastFuture;
         balancer.handleResolvedAddresses(raDisable);
 
-        assertTrue(prevFuture.isCancelled(), "previous ticker cancelled");
+        // The tick also prunes and adapts half-lives (#99), so disabling ejection keeps it.
+        assertFalse(prevFuture.isCancelled(), "ticker keeps running");
+        assertSame(prevFuture, helper.scheduler.lastFuture, "not rescheduled");
     }
 
     @Test
@@ -516,7 +518,11 @@ class PeakEwmaP2CBalancerTest {
                         .setLoadBalancingPolicyConfig(parsed)
                         .build());
 
-        assertTrue(prevFuture.isCancelled(), "outlierEnabled=false from parsed config applied");
+        @SuppressWarnings("unchecked")
+        var cfgRef =
+                (java.util.concurrent.atomic.AtomicReference<PeakEwmaConfig>)
+                        AdversarialFixture.getField(balancer, "cfg");
+        assertFalse(cfgRef.get().outlierEnabled, "outlierEnabled=false from parsed config applied");
     }
 
     @Test

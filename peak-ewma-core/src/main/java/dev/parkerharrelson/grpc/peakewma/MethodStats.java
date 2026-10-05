@@ -204,8 +204,6 @@ public final class MethodStats {
         // The first real sample replaces the seed outright. Blending it with the seed using the
         // 30 s slow half-life pinned the baseline near initialRttMicros for ~a minute.
         double fast = s.fastIsSeed ? rttMicros : Math.max(rttMicros, decayedFast(s, now));
-        double slow =
-                s.samples == 0 ? rttMicros : rttMicros * (1 - decaySlow) + s.slowMicros * decaySlow;
 
         // Exponentially weighted mean/variance on the slow horizon, bias-corrected: the weight of
         // a new sample is at least 1/(n+1), so the first samples behave like a plain average.
@@ -213,6 +211,10 @@ public final class MethodStats {
         double diff = rttMicros - s.meanMicros;
         double mean = s.meanMicros + weight * diff;
         double var = (1 - weight) * (s.varMicros + weight * diff * diff);
+        // The slow EWMA is that same bias-corrected mean. A plain EWMA started from the first
+        // sample kept ~half its weight on that one sample for a whole baseline half-life (30 s
+        // before the first tick), skewing the outlier baseline and the fleet seed.
+        double slow = mean;
 
         return new State(
                 fast,
