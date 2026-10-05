@@ -57,4 +57,22 @@ public interface LbMetrics {
     default void recordObservedRtt(String method, long rttNanos) {
         // default no-op so existing implementations need not be updated
     }
+
+    /**
+     * Publishes the fleet-derived scale of a method, recomputed every outlier tick: the peak and
+     * baseline half-lives before the per-peer noise adjustment, and the seed latency a backend that
+     * hasn't served the method yet is scored at ({@code NaN} until known).
+     */
+    default void setMethodScale(
+            String method,
+            double peakHalfLifeMillis,
+            double baselineHalfLifeMillis,
+            double seedMicros) {
+        // default no-op so existing implementations need not be updated
+    }
+
+    /** Records how long one outlier tick took on the synchronization context. */
+    default void recordOutlierTick(long durationNanos) {
+        // default no-op so existing implementations need not be updated
+    }
 }

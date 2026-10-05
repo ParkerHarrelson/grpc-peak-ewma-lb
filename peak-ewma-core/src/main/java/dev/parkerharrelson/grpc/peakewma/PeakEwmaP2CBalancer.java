@@ -232,6 +232,15 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
         if (shutdown) {
             return;
         }
+        long tickStart = System.nanoTime();
+        try {
+            outlierTickBody();
+        } finally {
+            metrics.recordOutlierTick(System.nanoTime() - tickStart);
+        }
+    }
+
+    private void outlierTickBody() {
         try {
             PeakEwmaConfig c = cfg.get();
             final long now = clocks.nanoTime();
@@ -312,6 +321,8 @@ final class PeakEwmaP2CBalancer extends LoadBalancer {
                     double typical = !warmSlow.isEmpty() ? median(warmSlow) : Double.NaN;
                     MethodScale sc = MethodScale.of(fleetRate, typical);
                     fleetScales.put(method, sc);
+                    metrics.setMethodScale(
+                            method, sc.tauFastMillis(), sc.tauSlowMillis(), sc.seedMicros());
                     for (PeerMethod pm : peers) pm.stats.setScale(sc);
                 }
 

@@ -57,6 +57,7 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
     private final LongCounter picks;
     private final LongCounter ejections;
     private final DoubleHistogram rtt;
+    private final DoubleHistogram outlierTick;
 
     private final GaugeCell readyCount = new GaugeCell(Attributes.empty());
     private final GaugeCell ejectedCount = new GaugeCell(Attributes.empty());
@@ -69,6 +70,9 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
     private final Map<String, GaugeCell> fastByMethod = new ConcurrentHashMap<>();
     private final Map<String, GaugeCell> rateByMethod = new ConcurrentHashMap<>();
     private final Map<String, GaugeCell> errorRateByMethod = new ConcurrentHashMap<>();
+    private final Map<String, GaugeCell> peakHalfLifeByMethod = new ConcurrentHashMap<>();
+    private final Map<String, GaugeCell> baselineHalfLifeByMethod = new ConcurrentHashMap<>();
+    private final Map<String, GaugeCell> seedByMethod = new ConcurrentHashMap<>();
 
     // Attribute sets for the synchronous instruments, cached so the hot path does not allocate.
     private final Map<String, Attributes> outcomeAttrs = new ConcurrentHashMap<>();
@@ -140,6 +144,41 @@ public final class OpenTelemetryLbMetrics implements LbMetrics, AutoCloseable {
                 fastByMethod);
         gauge(meter, "lb.method.rate_per_sec", "Call rate.", "{call}/s", rateByMethod);
         gauge(meter, "lb.method.error_rate", "Error rate.", "1", errorRateByMethod);
+        gauge(
+                meter,
+                "lb.method.peak_half_life_millis",
+                "Fleet-derived peak EWMA half-life.",
+                "ms",
+                peakHalfLifeByMethod);
+        gauge(
+                meter,
+                "lb.method.baseline_half_life_millis",
+                "Fleet-derived baseline EWMA half-life.",
+                "ms",
+                baselineHalfLifeByMethod);
+        gauge(meter, "lb.method.seed_micros", "Seed latency for new backends.", "us", seedByMethod);
+        this.outlierTick =
+                meter.histogramBuilder("lb.outlier.tick")
+                        .setDescription("Outlier tick duration on the synchronization context.")
+                        .setUnit("s")
+                        .build();
+    }
+
+    @Override
+    public void setMethodScale(
+            String method,
+            double peakHalfLifeMillis,
+            double baselineHalfLifeMillis,
+            double seedMicros) {
+        if (method == null) return;
+        cell(peakHalfLifeByMethod, method, this::methodAttrs).value = peakHalfLifeMillis;
+        cell(baselineHalfLifeByMethod, method, this::methodAttrs).value = baselineHalfLifeMillis;
+        cell(seedByMethod, method, this::methodAttrs).value = seedMicros;
+    }
+
+    @Override
+    public void recordOutlierTick(long durationNanos) {
+        outlierTick.record(durationNanos / 1_000_000_000.0);
     }
 
     @Override

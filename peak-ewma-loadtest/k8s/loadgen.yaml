@@ -1,0 +1,41 @@
+# One loadgen Job per (policy, client). Placeholders are substituted by kind-smoke.sh (or sed):
+#   __NAME__ __POLICY__ __RPS__ __NS__ __CLIENT__ __WARMUP__ __DURATION__
+# The JSONL result is printed to stdout after the run, so `kubectl logs job/<name>` collects it
+# (the loadgen itself writes only JVM warnings, to stderr).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __NAME__
+  labels: {app: loadtest-loadgen, policy: __POLICY__}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {app: loadtest-loadgen, policy: __POLICY__}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: loadgen
+          image: peak-ewma-loadtest:dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              java -Xmx384m -cp /app/loadtest.jar
+              dev.parkerharrelson.grpc.peakewma.loadtest.LoadGen
+              --target dns:///loadtest-backend.__NS__.svc.cluster.local:9000
+              --policy __POLICY__ --client-id __CLIENT__ --rps __RPS__ --threads 4
+              --methods U10_get --warmup-s __WARMUP__ --duration-s __DURATION__
+              --phase fault:__FAULT_START__:__FAULT_END__
+              --out /out/result.jsonl 2>/dev/null
+              && cat /out/result.jsonl
+          volumeMounts:
+            - {name: out, mountPath: /out}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 512Mi}
+      volumes:
+        - name: out
+          emptyDir: {}
