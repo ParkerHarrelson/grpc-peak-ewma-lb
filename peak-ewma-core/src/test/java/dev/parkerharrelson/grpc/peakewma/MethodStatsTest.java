@@ -67,7 +67,9 @@ class MethodStatsTest {
         double df2 = EwmaClocks.decayFactor(t2, t1, cfg.tauFastMillis);
         double ds2 = EwmaClocks.decayFactor(t2, t1, cfg.tauSlowMillis);
         double expectedFast2 = Math.max(2000.0, expectedFast1 * df2);
-        double expectedSlow2 = 2000.0 * (1 - ds2) + expectedSlow1 * ds2;
+        // The slow EWMA is bias-corrected: with two samples a sample's weight is at least 1/2,
+        // so it is the plain average here (an uncorrected EWMA would still sit near the first).
+        double expectedSlow2 = 2000.0 * Math.max(1 - ds2, 0.5) + expectedSlow1 * Math.min(ds2, 0.5);
 
         ms.update(t2, rtt2, cfg);
         assertEquals(expectedFast2, ms.getEwmaFastMicros(), 1e-6);

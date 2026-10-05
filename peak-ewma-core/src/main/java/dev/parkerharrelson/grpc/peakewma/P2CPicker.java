@@ -19,7 +19,8 @@ public final class P2CPicker extends SubchannelPicker {
 
     /**
      * Resamples allowed to replace an ejected peer before falling back to a full scan. Ejection is
-     * capped at 50% of the fleet, so the fallback runs for at most ~0.5^8 = 0.4% of picks.
+     * capped at 20% of a method's peers (at least one), so with three or more peers the fallback
+     * runs for well under 1% of picks; with two, the survivor is taken without resampling.
      */
     private static final int MAX_RESAMPLES = 8;
 
@@ -145,8 +146,11 @@ public final class P2CPicker extends SubchannelPicker {
             if (i2 >= i1) i2++;
             double ca = costAt(i1, method, now);
             double cb = costAt(i2, method, now);
+            // With two peers there is nothing else to resample (it would draw the same ejected
+            // peer every time): the survivor, if any, is taken below.
+            int maxResamples = n > 2 ? MAX_RESAMPLES : 0;
             for (int attempt = 0;
-                    attempt < MAX_RESAMPLES && (Double.isInfinite(ca) || Double.isInfinite(cb));
+                    attempt < maxResamples && (Double.isInfinite(ca) || Double.isInfinite(cb));
                     attempt++) {
                 if (Double.isInfinite(ca)) {
                     i1 = otherIndex(rnd, n, i2);
@@ -165,6 +169,11 @@ public final class P2CPicker extends SubchannelPicker {
                                 : readyPool.get(i2);
                 metrics.recordPick(OK);
                 return buildPickResult(chosen, method, recordLatency);
+            }
+            if (n == 2 && (!Double.isInfinite(ca) || !Double.isInfinite(cb))) {
+                metrics.recordPick(OK);
+                return buildPickResult(
+                        readyPool.get(Double.isInfinite(ca) ? i2 : i1), method, recordLatency);
             }
         }
         return pickByScan(method, now, n, recordLatency);
