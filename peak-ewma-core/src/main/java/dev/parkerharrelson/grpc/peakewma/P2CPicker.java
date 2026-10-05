@@ -19,7 +19,8 @@ public final class P2CPicker extends SubchannelPicker {
 
     /**
      * Resamples allowed to replace an ejected peer before falling back to a full scan. Ejection is
-     * capped at 50% of the fleet, so the fallback runs for at most ~0.5^8 = 0.4% of picks.
+     * capped at 20% of a method's peers (at least one), so with three or more peers the fallback
+     * runs for well under 1% of picks; with two, the survivor is taken without resampling.
      */
     private static final int MAX_RESAMPLES = 8;
 

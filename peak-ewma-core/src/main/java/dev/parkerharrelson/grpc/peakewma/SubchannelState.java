@@ -3,13 +3,12 @@ package dev.parkerharrelson.grpc.peakewma;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Per-subchannel bookkeeping that is not metric-specific: readiness timestamp (for warmup) and
- * active/past ejection windows.
+ * Per-subchannel bookkeeping that is not metric-specific: readiness timestamp and active/past
+ * ejection windows.
  *
  * <p>Readiness is stamped by the balancer's subchannel listener each time gRPC reports {@code
- * READY}. The picker's warmup factor decays from 2.0 → 1.0 over the first {@code warmupMsEff}
- * milliseconds since that stamp, so newly-ready peers don't immediately pull traffic away from
- * already-proven peers.
+ * READY}. (There is no warmup ramp any more: a peer that hasn't served a method yet is scored at
+ * the fleet's typical latency for it.)
  *
  * <p>Ejection is represented as an "until" nano-timestamp; writes use {@link #ejectUntil(long)};
  * reads use {@link #isEjected(long)}. {@link #lastEjectEndNanos()} tracks the tail so the outlier
