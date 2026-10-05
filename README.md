@@ -28,6 +28,7 @@ ManagedChannel channel =
 | `peak-ewma-opentelemetry` | `LbMetrics` adapter for the OpenTelemetry metrics API.                     | core, `opentelemetry-api`  |
 | `peak-ewma-harness`       | In-process benchmark rig with fault injection. Not published.              | core, micrometer, netty    |
 | `peak-ewma-bench`         | CPU/memory overhead + JMH comparison vs grpc-java's built-in policies. Not published. See [its README](peak-ewma-bench/README.md). | core, harness, grpc-xds, JMH |
+| `peak-ewma-loadtest`      | Multi-process / Kubernetes load test (#94): overhead matrix + routing quality under failures, one JVM per pod. Not published. See [its README](peak-ewma-loadtest/README.md). | core, grpc-xds, HdrHistogram |
 
 ```xml
 <dependency>

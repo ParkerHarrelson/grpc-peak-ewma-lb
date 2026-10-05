@@ -1,0 +1,5 @@
+policy,rps,ok %,p99 ms,p99 during brownout ms,faulty pod share during brownout %,ejections
+round_robin,300,100.0,70.8,80.7,16.6,{}
+peak_ewma_p2c,300,100.0,22.5,23.8,0.9,"{""latency"": 3}"
+least_request,300,100.0,64.0,74.8,9.3,{}
+least_request + outlier_detection,300,100.0,63.4,73.8,9.1,{}

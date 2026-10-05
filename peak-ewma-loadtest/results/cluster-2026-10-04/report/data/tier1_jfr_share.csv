@@ -1,0 +1,7 @@
+cell,policy,samples,LB inclusive %,LB self %,harness self %
+centre,peak_ewma_p2c,202,0.9900990099009901,0.0,0.0
+centre,round_robin,184,0.0,0.0,0.0
+corner_big,peak_ewma_p2c,1280,10.46875,0.0,0.0
+corner_big,round_robin,1001,0.0,0.0,0.0
+corner_small,peak_ewma_p2c,219,1.36986301369863,0.0,0.0
+corner_small,round_robin,248,0.0,0.0,0.0

@@ -47,6 +47,10 @@ public final class MicrometerLbMetrics implements LbMetrics {
     private final Map<String, AtomicReference<Double>> outlierLatencyRatioBySub =
             new ConcurrentHashMap<>();
     private final Map<String, Timer> rttTimerByMethod = new ConcurrentHashMap<>();
+    private final Map<String, AtomicReference<Double>> scaleValues = new ConcurrentHashMap<>();
+    private final Map<String, Timer> tracerTimers = new ConcurrentHashMap<>();
+    private volatile Timer outlierTickTimer;
+    private volatile Timer pickTimer;
 
     public MicrometerLbMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -302,5 +306,74 @@ public final class MicrometerLbMetrics implements LbMetrics {
                                         .maximumExpectedValue(Duration.ofSeconds(30))
                                         .register(registry));
         timer.record(rttNanos, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public void setMethodScale(
+            String method,
+            double peakHalfLifeMillis,
+            double baselineHalfLifeMillis,
+            double seedMicros) {
+        if (method == null) return;
+        scaleGauge("lb.method.peak_half_life_millis", method, peakHalfLifeMillis);
+        scaleGauge("lb.method.baseline_half_life_millis", method, baselineHalfLifeMillis);
+        scaleGauge("lb.method.seed_micros", method, seedMicros);
+    }
+
+    private void scaleGauge(String name, String method, double value) {
+        scaleValues
+                .computeIfAbsent(
+                        name + "|" + method,
+                        k -> {
+                            AtomicReference<Double> r = new AtomicReference<>(value);
+                            Gauge.builder(name, r, AtomicReference::get)
+                                    .tag(METHOD, method)
+                                    .register(registry);
+                            return r;
+                        })
+                .set(value);
+    }
+
+    @Override
+    public void recordOutlierTick(long durationNanos) {
+        Timer t = outlierTickTimer;
+        if (t == null) {
+            t =
+                    Timer.builder("lb.outlier.tick")
+                            .description("Outlier tick duration on the synchronization context.")
+                            .publishPercentiles(0.5, 0.99)
+                            .register(registry);
+            outlierTickTimer = t;
+        }
+        t.record(durationNanos, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public void recordPickNanos(long durationNanos) {
+        Timer t = pickTimer;
+        if (t == null) {
+            t =
+                    Timer.builder("lb.pick.duration")
+                            .description("Sampled pickSubchannel duration.")
+                            .publishPercentiles(0.5, 0.99, 0.999)
+                            .register(registry);
+            pickTimer = t;
+        }
+        t.record(durationNanos, TimeUnit.NANOSECONDS);
+    }
+
+    @Override
+    public void recordTracerNanos(String callback, long durationNanos) {
+        if (callback == null) return;
+        tracerTimers
+                .computeIfAbsent(
+                        callback,
+                        c ->
+                                Timer.builder("lb.tracer.duration")
+                                        .description("Sampled stream-tracer callback duration.")
+                                        .tag("callback", c)
+                                        .publishPercentiles(0.5, 0.99)
+                                        .register(registry))
+                .record(durationNanos, TimeUnit.NANOSECONDS);
     }
 }

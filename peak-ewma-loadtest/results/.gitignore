@@ -1,0 +1,11 @@
+# Raw run data (JSONL, JFR, logs: hundreds of MB per run) stays local; report.py regenerates
+# everything from it. Commit only the summary, its charts, the tables and the run manifest.
+/*/**
+!/*/
+!/*/SUMMARY.md
+!/*/manifest.json
+!/*/charts/
+!/*/charts/*.png
+!/*/report/
+!/*/report/data/
+!/*/report/data/*.csv

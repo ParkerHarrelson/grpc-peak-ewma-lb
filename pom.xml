@@ -41,6 +41,9 @@
 
         <!-- JMH + overhead benchmarks vs grpc-java's built-in policies. Not published. -->
         <module>peak-ewma-bench</module>
+
+        <!-- Multi-process / Kubernetes load test (#94). Not published. -->
+        <module>peak-ewma-loadtest</module>
     </modules>
 
     <properties>

@@ -4,6 +4,7 @@ import static dev.parkerharrelson.grpc.peakewma.LBConstants.*;
 import static java.util.Arrays.sort;
 
 import dev.parkerharrelson.grpc.peakewma.metrics.LbMetrics;
+import dev.parkerharrelson.grpc.peakewma.metrics.SampledTimers;
 import io.grpc.LoadBalancer;
 import io.grpc.LoadBalancer.PickResult;
 import io.grpc.LoadBalancer.SubchannelPicker;
@@ -112,6 +113,16 @@ public final class P2CPicker extends SubchannelPicker {
 
     @Override
     public PickResult pickSubchannel(LoadBalancer.PickSubchannelArgs args) {
+        if (SampledTimers.ENABLED && SampledTimers.sample()) {
+            long start = System.nanoTime();
+            PickResult result = pick(args);
+            metrics.recordPickNanos(System.nanoTime() - start);
+            return result;
+        }
+        return pick(args);
+    }
+
+    private PickResult pick(LoadBalancer.PickSubchannelArgs args) {
         if (readyPool.isEmpty()) {
             metrics.recordPick(NO_READY);
             return PickResult.withNoResult();
